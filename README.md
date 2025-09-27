@@ -52,7 +52,7 @@ Check reproducibility, test model hypotheses, train classifiers.
 
 ```
 bbx analyze --runs data/run_000 --radius 1 \
-  --tests conflicts,permutation,totalistic \
+  --tests shape,conflicts,permutation,totalistic \
   --period-scan edge,corner_edge \
   --train-clf --clf-period 2 \
   --out reports
