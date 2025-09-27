@@ -57,6 +57,26 @@ def neigh_key(state, i, j, r=1, oob_val=-1):
                 vals.append(oob_val)
     return ",".join(map(str, vals))
 
+def neigh_key_wrap(state, i, j, r=1):
+    """Flattened neighborhood with wrap-around (torus)."""
+    H, W = state.shape
+    vals = []
+    for di in range(-r, r+1):
+        ii = (i + di) % H
+        for dj in range(-r, r+1):
+            jj = (j + dj) % W
+            vals.append(int(state[ii, jj]))
+    return ",".join(map(str, vals))
+
+def apply_rule_wrap(state, rule, r=1):
+    """Apply a rulebook assuming wrap-around boundaries."""
+    H, W = state.shape
+    nxt = np.empty_like(state)
+    for i in range(H):
+        for j in range(W):
+            k = neigh_key_wrap(state, i, j, r=r)
+            nxt[i, j] = rule.get(k, state[i, j])
+    return nxt
 
 # --- Rule learning ---
 

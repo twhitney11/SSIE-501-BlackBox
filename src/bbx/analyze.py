@@ -10,7 +10,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from sklearn.linear_model import LogisticRegression
 import joblib
-
+import pandas as pd
+import hashlib
 
 # ---- import local helpers from process.py ----
 from .process import (
@@ -350,9 +351,196 @@ def plot_label_histogram(states, labels, outdir: Path = None, prefix=""):
         print(f"[saved] {p}")
     plt.close()
 
+# ----- SHAPE DIAGNOSTICS (ring/border evidence) -----
+
+BLACK, WHITE = "gru", "mex"   # adjust if your legend changes
+
+def chebyshev_distance_from_edge(H, W):
+    I, J = np.indices((H, W))
+    d_top, d_left = I, J
+    d_bottom, d_right = (H-1)-I, (W-1)-J
+    return np.minimum(np.minimum(d_top, d_bottom), np.minimum(d_left, d_right))
+
+def black_radial_profile(states, labels, black_label=BLACK):
+    """Fraction of black at each Chebyshev distance d from the edge, per step."""
+    black_idx = labels.index(black_label)
+    H, W = states[0].shape
+    D = chebyshev_distance_from_edge(H, W)
+    maxd = int(D.max())
+    rows = []
+    for t, S in enumerate(states):
+        for d in range(maxd + 1):
+            mask = (D == d)
+            frac = (S[mask] == black_idx).mean()
+            rows.append({"step": t, "d": d, "black_fraction": float(frac)})
+    return pd.DataFrame(rows)
+
+def plot_black_radial_profile(df_rad, out_png: Path, title="Black fraction vs distance from edge"):
+    """Heat-map like lineplot: average across steps."""
+    piv = df_rad.groupby("d")["black_fraction"].mean()
+    plt.figure(figsize=(8,4))
+    plt.plot(piv.index.values, piv.values, marker='o')
+    plt.xlabel("Chebyshev distance from edge (cells)")
+    plt.ylabel("Mean black fraction")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {out_png}")
+
+def black_by_row_col(states, labels, black_label=BLACK):
+    """Row/column peak locations & magnitudes for black, per step."""
+    black_idx = labels.index(black_label)
+    rows = []
+    for t, S in enumerate(states):
+        by_row = (S == black_idx).mean(axis=1)
+        by_col = (S == black_idx).mean(axis=0)
+        rows.append({
+            "step": t,
+            "row_max": float(by_row.max()),
+            "row_argmax": int(by_row.argmax()),
+            "col_max": float(by_col.max()),
+            "col_argmax": int(by_col.argmax())
+        })
+    return pd.DataFrame(rows)
+
+def plot_row_col_traces(df_rc, H, W, out_png: Path, title="Black row/col peaks over time"):
+    plt.figure(figsize=(10,4))
+    ax1 = plt.subplot(1,2,1)
+    ax1.plot(df_rc["step"], df_rc["row_argmax"], marker='.', linewidth=0.7)
+    ax1.set_title("Row of max black fraction"); ax1.set_xlabel("Step"); ax1.set_ylabel("Row idx")
+    ax1.set_ylim(-1, H)
+    ax2 = plt.subplot(1,2,2)
+    ax2.plot(df_rc["step"], df_rc["col_argmax"], marker='.', linewidth=0.7)
+    ax2.set_title("Col of max black fraction"); ax2.set_xlabel("Step"); ax2.set_ylabel("Col idx")
+    ax2.set_ylim(-1, W)
+    plt.suptitle(title, y=1.02)
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {out_png}")
+
+def band_mask(H, W, d0, d1):
+    """Boolean mask for a ring/band between distances [d0, d1] from the edge."""
+    D = chebyshev_distance_from_edge(H, W)
+    return (D >= d0) & (D <= d1)
+
+def band_vs_interior_fractions(states, labels, d0=2, d1=3, black_label=BLACK, white_label=WHITE):
+    """Compare black/white fractions in a band vs the interior."""
+    idx_black = labels.index(black_label)
+    idx_white = labels.index(white_label)
+    H, W = states[0].shape
+    band = band_mask(H, W, d0, d1)
+    interior = ~band
+    rows = []
+    for t, S in enumerate(states):
+        b_frac_black = (S[band] == idx_black).mean()
+        b_frac_white = (S[band] == idx_white).mean()
+        i_frac_black = (S[interior] == idx_black).mean()
+        i_frac_white = (S[interior] == idx_white).mean()
+        rows.append({
+            "step": t,
+            "band_black": float(b_frac_black),
+            "band_white": float(b_frac_white),
+            "interior_black": float(i_frac_black),
+            "interior_white": float(i_frac_white),
+        })
+    return pd.DataFrame(rows)
+
+def plot_band_vs_interior(df_band, out_png: Path, d0=2, d1=3, title=None):
+    title = title or f"Band (d∈[{d0},{d1}]) vs interior — black/white fractions"
+    plt.figure(figsize=(10,4))
+    # smol smoothing for readability
+    def smooth(y, w=9):
+        y = pd.Series(y)
+        return y.rolling(w, center=True, min_periods=1).mean().values
+    steps = df_band["step"].values
+    plt.plot(steps, smooth(df_band["band_black"]), label=f"band black", linewidth=1.5)
+    plt.plot(steps, smooth(df_band["interior_black"]), label=f"interior black", linewidth=1.0, linestyle="--")
+    plt.plot(steps, smooth(df_band["band_white"]), label=f"band white", linewidth=1.5)
+    plt.plot(steps, smooth(df_band["interior_white"]), label=f"interior white", linewidth=1.0, linestyle="--")
+    plt.xlabel("Step"); plt.ylabel("Fraction"); plt.title(title)
+    plt.legend(loc="best")
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {out_png}")
+
+# ---- Cycle detection ----
+def detect_cycle(states):
+    """Return dict with preperiod/period if a repeated state is found; else None."""
+    seen = {}
+    for t, S in enumerate(states):
+        h = hashlib.blake2b(S.tobytes(), digest_size=16).digest()
+        if h in seen:
+            t1 = seen[h]; t2 = t
+            return {"first_seen": t1, "repeat_at": t2,
+                    "preperiod": t1, "period": t2 - t1}
+        seen[h] = t
+    return None
+
+# ---- Ring radius tracking (black) ----
+BLACK, WHITE = "gru", "mex"
+
+def cheb_D(H, W):
+    I, J = np.indices((H, W))
+    return np.minimum.reduce([I, J, (H-1)-I, (W-1)-J])
+
+def ring_radius_series(states, labels, black_label=BLACK):
+    black_idx = labels.index(black_label)
+    H, W = states[0].shape
+    D = cheb_D(H, W)
+    maxd = int(D.max())
+    radii = []
+    for S in states:
+        # mean black per distance; argmax
+        means = [(d, (S[D==d] == black_idx).mean()) for d in range(maxd+1)]
+        radii.append(int(max(means, key=lambda x: x[1])[0]))
+    return np.array(radii)
+
+def plot_ring_radius_series(radii, out_png: Path, title="Ring radius over time"):
+    plt.figure(figsize=(10,3.5))
+    plt.plot(np.arange(len(radii)), radii, marker='.', linewidth=0.8)
+    plt.xlabel("Step"); plt.ylabel("radius (cells)"); plt.title(title)
+    plt.tight_layout(); plt.savefig(out_png, dpi=150, bbox_inches="tight"); plt.close()
+    print(f"[saved] {out_png}")
+
+def plot_ring_radius_hist(radii, out_png: Path, title="Ring radius histogram"):
+    plt.figure(figsize=(6,4))
+    plt.hist(radii, bins=np.arange(radii.min()-0.5, radii.max()+1.5, 1))
+    plt.xlabel("radius (cells)"); plt.ylabel("count"); plt.title(title)
+    plt.tight_layout(); plt.savefig(out_png, dpi=150, bbox_inches="tight"); plt.close()
+    print(f"[saved] {out_png}")
+
+# ---- Torus (wrap) simulation using learned positional rule ----
+from process import neigh_key_wrap, apply_rule_wrap  # added in process.py
+
+def learn_rule_wrap_ready(S, T, r=1):
+    """Learn rule using *wrapped* keys so we can later simulate on a torus."""
+    H, W = S.shape
+    rule = {}
+    conflicts = 0
+    for i in range(H):
+        for j in range(W):
+            k = neigh_key_wrap(S, i, j, r=r)
+            y = int(T[i, j])
+            if k in rule and rule[k] != y: conflicts += 1
+            else: rule[k] = y
+    return rule, conflicts
+
+def simulate_wrap(initial, rule, r=1, steps=50):
+    states = [initial.copy()]
+    for _ in range(steps):
+        states.append(apply_rule_wrap(states[-1], rule, r=r))
+    return states
+
 # --------------- CLI runners ---------------
 
-def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode="", train_clf=False, clf_period=None):
+def run_analysis(run_dirs, outdir: Path, radius=1, tests=None,
+                 period_scan_mode="", train_clf=False, clf_period=None,
+                 do_cycle=True, do_ring=True, do_torus=True):
+
     tests = set((tests or "").split(",")) if tests else set()
     all_states, labels, label_to_idx, per_run = load_runs_encoded(run_dirs)
     ensure_dir(outdir)
@@ -374,6 +562,14 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
     if per_run:
         plot_mismatch_curve(per_run[0], r=radius, outdir=outdir, prefix="run0_")
         plot_label_histogram(per_run[0], labels, outdir=outdir, prefix="run0_")
+
+    # Consistency across runs
+    try:
+        df_cons = consistency_summary(per_run, labels)
+        df_cons.to_csv(outdir / "consistency_summary.csv", index=False)
+        print(f"[saved] {outdir/'consistency_summary.csv'}")
+    except Exception as e:
+        print("[warn] consistency summary failed:", e)
 
     # Conflict inspection & export
     if "conflicts" in tests or not tests:
@@ -427,6 +623,84 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
             plot_sequence(sim_states, labels, colors, steps=list(range(0,31,5)))
         except Exception as e:
             print("[warn] plotting failed (viz.py not present or colors missing):", e)
+
+    # --- Shape diagnostics (ring/border evidence) ---
+    if "shape" in tests or not tests:
+        # Use the first run for clean geometry pictures (you can aggregate later)
+        if per_run:
+            states = per_run[0]
+            H, W = states[0].shape
+
+            # 1) Radial profile
+            df_rad = black_radial_profile(states, labels, black_label=BLACK)
+            save_csv([["step","d","black_fraction"]] + df_rad.values.tolist(),
+                     outdir / "shape_radial_black.csv")
+            plot_black_radial_profile(df_rad,
+                                      out_png=outdir / "shape_radial_black.png",
+                                      title=f"Black vs distance (run_0)")
+
+            # 2) Row/Col peaks over time
+            df_rc = black_by_row_col(states, labels, black_label=BLACK)
+            save_csv([["step","row_max","row_argmax","col_max","col_argmax"]] + df_rc.values.tolist(),
+                     outdir / "shape_rowcol_black.csv")
+            plot_row_col_traces(df_rc, H, W,
+                                out_png=outdir / "shape_rowcol_black.png",
+                                title="Row/Col of max black fraction (run_0)")
+
+            # 3) Band vs interior fractions (tweak d0/d1 if your ring sits deeper)
+            d0, d1 = 2, 3
+            df_band = band_vs_interior_fractions(states, labels, d0=d0, d1=d1,
+                                                 black_label=BLACK, white_label=WHITE)
+            df_band.to_csv(outdir / f"shape_band_d{d0}-{d1}.csv", index=False)
+            plot_band_vs_interior(df_band,
+                                  out_png=outdir / f"shape_band_d{d0}-{d1}.png",
+                                  d0=d0, d1=d1,
+                                  title=f"Band d∈[{d0},{d1}] vs interior — black/white (run_0)")
+            print("[saved] shape diagnostics CSVs/PNGs")
+
+    # ---- Cycle detection + ring tracking on first run ----
+    if per_run:
+        states0 = per_run[0]
+        # Cycle detection
+        if do_cycle:
+            cyc = detect_cycle(states0)
+            save_json({"cycle": cyc}, outdir / "cycle_report_run0.json")
+            print("[cycle] run_0:", cyc)
+
+        # Ring tracking
+        if do_ring:
+            radii = ring_radius_series(states0, labels, black_label=BLACK)
+            pd.Series(radii).to_csv(outdir / "ring_radius_run0.csv", index=False, header=["radius"])
+            plot_ring_radius_series(radii, out_png=outdir / "ring_radius_run0.png",
+                                    title="Ring radius over time — run_0")
+            plot_ring_radius_hist(radii, out_png=outdir / "ring_radius_hist_run0.png",
+                                  title="Ring radius histogram — run_0")
+
+    # ---- Torus (wrap) test: learn on early transition and simulate on a crop with wrap ----
+    if do_torus and per_run:
+        states0 = per_run[0]
+        S, T = states0[0], states0[1]  # learn from first transition (you can average later)
+        rb_wrap, conf = learn_rule_wrap_ready(S, T, r=radius)
+        print(f"[torus] learned wrap-ready rule, size={len(rb_wrap)}, conflicts={conf}")
+
+        # start from a central crop to avoid edges
+        H, W = S.shape
+        a, b = 1, H-1  # drop 1-cell border
+        init_crop = S[a:b, a:b].copy()
+        sim = simulate_wrap(init_crop, rb_wrap, r=radius, steps=100)
+
+        # summarize: black fraction over time on torus
+        idx_black = labels.index(BLACK)
+        blk = [float((X == idx_black).mean()) for X in sim]
+        pd.DataFrame({"step": np.arange(len(blk)), "black_frac": blk}) \
+          .to_csv(outdir / "torus_black_frac.csv", index=False)
+
+        # quick plot
+        plt.figure(figsize=(8,3))
+        plt.plot(blk, marker='.')
+        plt.xlabel("step"); plt.ylabel("black fraction"); plt.title("Torus sim (wrap) — black fraction")
+        plt.tight_layout(); plt.savefig(outdir / "torus_black_frac.png", dpi=150, bbox_inches="tight"); plt.close()
+        print("[saved] torus_black_frac.csv/.png")
 
     print("[done] analyze.py finished.")
 
@@ -551,6 +825,28 @@ def simulate_with_classifier(initial, clf, meta, steps=50):
                 Tnext[i, j] = pred
         states.append(Tnext)
     return states
+
+def consistency_summary(per_run_states, labels):
+    """Return a dict of per-run stats for easy comparison."""
+    idx_black = labels.index(BLACK)
+    idx_white = labels.index(WHITE)
+    rows = []
+    for ridx, states in enumerate(per_run_states):
+        # global fractions (last 200 steps if available)
+        tail = states[-200:] if len(states) > 200 else states
+        blk = [float((S == idx_black).mean()) for S in tail]
+        wht = [float((S == idx_white).mean()) for S in tail]
+        # ring radius
+        radii = ring_radius_series(tail, labels, black_label=BLACK)
+        rows.append({
+            "run": ridx,
+            "steps": len(states),
+            "black_mean": float(np.mean(blk)), "black_std": float(np.std(blk)),
+            "white_mean": float(np.mean(wht)), "white_std": float(np.std(wht)),
+            "ring_mode": int(pd.Series(radii).mode().iloc[0]),
+            "ring_mean": float(np.mean(radii)), "ring_std": float(np.std(radii)),
+        })
+    return pd.DataFrame(rows)
 
 # --------------- main ---------------
 

@@ -63,7 +63,10 @@ def cmd_analyze(args):
         tests=args.tests,
         period_scan_mode=args.period_scan,
         train_clf=args.train_clf,
-        clf_period=args.clf_period
+        clf_period=args.clf_period,
+        do_cycle=not args.no_cycle,
+        do_ring=not args.no_ring,
+        do_torus=not args.no_torus,
     )
 
 def cmd_fractions(args):
@@ -107,10 +110,13 @@ def main():
     apa = sub.add_parser("analyze", help="Period scan, classifier, simulate")
     apa.add_argument("--runs", nargs="+", required=True)
     apa.add_argument("--radius", type=int, default=1)
-    apa.add_argument("--tests", default="", help="conflicts,permutation,totalistic")
+    apa.add_argument("--tests", default="", help="shape,conflicts,permutation,totalistic")
     apa.add_argument("--period-scan", default="", help="none,edge,corner_edge (comma-sep)")
     apa.add_argument("--train-clf", action="store_true")
     apa.add_argument("--clf-period", default="")
+    apa.add_argument("--no-cycle", action="store_true", help="Disable cycle detection")
+    apa.add_argument("--no-ring", action="store_true", help="Disable ring tracking")
+    apa.add_argument("--no-torus", action="store_true", help="Disable torus wrap test")
     add_common_out(apa)
     apa.set_defaults(func=cmd_analyze)
 
