@@ -1,0 +1,25 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "bbx"
+version = "0.1.0"
+requires-python = ">=3.10"
+dependencies = [
+  "numpy",
+  "pandas",
+  "matplotlib",
+  "scikit-learn",
+  "joblib",
+  "requests",
+  "beautifulsoup4"
+]
+
+[project.scripts]
+bbx = "bbx.__main__:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["bbx*"]
+exclude = ["data*", "reports*"]
