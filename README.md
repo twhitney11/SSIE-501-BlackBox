@@ -1,7 +1,5 @@
 # Black Box Cellular Automaton Toolkit (bbx)
 
- 
-
 This package provides tools to **collect, process, and analyze** data from the “Black Box” cellular automaton (CA) system used in our SSIE 501 project.\
 It is designed to help us replicate, visualize, and hypothesize about the underlying rules of the system.
 
@@ -13,7 +11,6 @@ Clone the repository and install in editable mode:
 git clone <your-repo-url>
 cd Automated Data Collection and Analysis with Python
 pip install -e .
-
 ```
 
 This provides a single command-line entry point: `bbx`.
@@ -22,7 +19,6 @@ Check it works:
 
 ```
 bbx --help
-
 ```
 
 ## Workflow
@@ -41,8 +37,6 @@ bbx collect --base-url http://localhost/BlackBox.php --steps 500 --out data
 * Optional: `--runs` controls how many independent runs to capture.
 * Starts with a reset unless you override.
 
-***
-
 ### 2. Processing
 
 Summarize runs: labels, neighborhood coverage, conflicts.
@@ -52,8 +46,6 @@ bbx process --runs data/run_000 data/run_001
 ```
 
 Outputs number of unique neighborhoods and step-level conflicts.
-
-***
 
 ### 3. Analysis
 
@@ -65,7 +57,6 @@ bbx analyze --runs data/run_000 --radius 1 \
   --period-scan edge,corner_edge \
   --train-clf --clf-period 2 \
   --out reports
-
 ```
 
 This can generate:
@@ -78,15 +69,12 @@ This can generate:
 
 All artifacts are saved to `reports/` (JSON, CSV, PNGs).
 
-***
-
 ### 4. Fractions reports
 
 Track black, white, and colored label fractions over time.
 
 ```
 bbx fractions --runs data/run_000 --out reports
-
 ```
 
 Generates:
@@ -126,10 +114,7 @@ bbx/              # Python package
 data/             # Saved runs (step_XXXX.json)
 reports/          # Generated CSVs, JSONs, PNGs
 label_colors.json # Mapping from labels → colors
-
 ```
-
-***
 
 ## Example: Full cycle
 
@@ -151,6 +136,4 @@ bbx analyze --runs data/run_000 --radius 1 \
 bbx fractions --runs data/run_000 --out reports
 
 ```
-
-***
 
