@@ -1,7 +1,6 @@
 # Black Box Cellular Automaton Toolkit (bbx)
 
-This package provides tools to **collect, process, and analyze** data from the “Black Box” cellular automaton (CA) system used in our SSIE 501 project.\
-It is designed to help us replicate, visualize, and hypothesize about the underlying rules of the system.
+This package provides tools to **collect, process, and analyze** data from the “Black Box” cellular automaton (CA) system used in our SSIE 501 BlockBox project. It is designed to help us replicate, visualize, and hypothesize about the underlying rules of the system.
 
 ## Installation
 
