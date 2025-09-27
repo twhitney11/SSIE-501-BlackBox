@@ -8,8 +8,8 @@ It is designed to help us replicate, visualize, and hypothesize about the underl
 Clone the repository and install in editable mode:
 
 ```
-git clone <your-repo-url>
-cd Automated Data Collection and Analysis with Python
+git clone https://github.com/twhitney11/SSIE-501-BlackBox.git ssie501-bbx
+cd ssie501-bbx
 pip install -e .
 ```
 
