@@ -150,6 +150,28 @@ def plot_front_over_time(states, labels, out_png: Path, title="Estimated black f
     plt.xlabel("Step"); plt.ylabel("Front distance from edge (cells)"); plt.title(title)
     save_plot(out_png)
 
+def plot_stacked_all_labels(df_long, colors, out_png, title="Fractions (stacked, all labels)"):
+    """
+    Stacked area plot of all labels individually over time.
+    """
+    piv = df_long.pivot(index="step", columns="label", values="fraction").fillna(0.0)
+    xs = piv.index.values
+    labs = piv.columns.tolist()
+    ys = [piv[lab].values for lab in labs]
+
+    plt.figure(figsize=(10,6))
+    plt.stackplot(xs, *ys,
+                  labels=labs,
+                  colors=[colors.get(lab, "#cccccc") for lab in labs])
+    plt.xlabel("Step")
+    plt.ylabel("Fraction of grid")
+    plt.title(title)
+    plt.legend(loc="center left", bbox_to_anchor=(1,0.5))
+    plt.tight_layout()
+    plt.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {out_png}")
+
 # ----------------- batch runner used by the CLI -----------------
 
 def run_fractions_reports(run_dirs, outdir: Path, colors_path="label_colors.json", smooth=9):
@@ -206,7 +228,9 @@ def run_fractions_reports(run_dirs, outdir: Path, colors_path="label_colors.json
             out_png=outdir / f"{rd.name}_front_radius.png",
             title=f"Estimated black front (ℓ∞) — {rd.name}"
         )
-
+        out_stacked_all = outdir / f"{rd.name}_fractions_stacked_all.png"
+        plot_stacked_all_labels(df, colors, out_png=out_stacked_all,
+                            title=f"Fractions (all labels) — {rd.name}")
 
 # ----------------- CLI / main -----------------
 
@@ -268,6 +292,9 @@ def main():
         out_png=out_dir / f"{run_dir.name}_front_radius.png",
         title=f"Estimated black front (ℓ∞) — {run_dir.name}"
     )
+    out_stacked_all = outdir / f"{run_name}_fractions_stacked_all.png"
+    plot_stacked_all_labels(df, colors, out_png=out_stacked_all,
+                        title=f"Fractions (all labels) — {run_name}")
 
 if __name__ == "__main__":
     main()

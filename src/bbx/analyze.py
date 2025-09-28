@@ -13,11 +13,17 @@ import joblib
 import pandas as pd
 import hashlib
 
+from .process import neigh_key_wrap, apply_rule_wrap
+
+
 # ---- import local helpers from process.py ----
 from .process import (
     load_run, build_label_map, encode_states,
     learn_rule, apply_rule, diff_count, neigh_key, coverage
 )
+
+# Setting some constants for black and white classes
+BLACK, WHITE = "gru", "mex"
 
 # --------------- IO utils ---------------
 
@@ -353,8 +359,6 @@ def plot_label_histogram(states, labels, outdir: Path = None, prefix=""):
 
 # ----- SHAPE DIAGNOSTICS (ring/border evidence) -----
 
-BLACK, WHITE = "gru", "mex"   # adjust if your legend changes
-
 def chebyshev_distance_from_edge(H, W):
     I, J = np.indices((H, W))
     d_top, d_left = I, J
@@ -467,6 +471,106 @@ def plot_band_vs_interior(df_band, out_png: Path, d0=2, d1=3, title=None):
     plt.close()
     print(f"[saved] {out_png}")
 
+def fractions_time_series(states, labels):
+    """Return dict label->np.array of fractions over time."""
+    import numpy as np
+    H, W = states[0].shape
+    total = H*W
+    L = len(labels)
+    out = {lab: np.zeros(len(states), dtype=float) for lab in labels}
+    for t, S in enumerate(states):
+        vals, counts = np.unique(S, return_counts=True)
+        freq = dict(zip(vals, counts))
+        for idx, lab in enumerate(labels):
+            out[lab][t] = freq.get(idx, 0) / total
+    return out
+
+def l_inf_front_radius(S, black_idx):
+    H, W = S.shape
+    rows = np.where((S == black_idx).any(axis=1))[0]
+    cols = np.where((S == black_idx).any(axis=0))[0]
+    if len(rows) == 0 or len(cols) == 0: return 0
+    d_top = rows.min()
+    d_bot = (H-1) - rows.max()
+    d_left = cols.min()
+    d_right = (W-1) - cols.max()
+    return int(min(d_top, d_bot, d_left, d_right))
+
+def ring_radius_series(states, labels):
+    import numpy as np
+    bidx = labels.index(BLACK)
+    return np.array([l_inf_front_radius(S, bidx) for S in states], dtype=int)
+
+def autocorr_1d(x, max_lag=64):
+    import numpy as np
+    x = np.asarray(x, dtype=float)
+    x = (x - x.mean())
+    denom = (x**2).sum()
+    if denom == 0: return np.zeros(max_lag+1)
+    ac = np.correlate(x, x, mode="full")
+    mid = len(ac)//2
+    ac = ac[mid:mid+max_lag+1] / denom
+    return ac  # ac[0] = 1.0
+
+def collapse_bw_other(S, labels):
+    """Map labels→{0:black,1:white,2:other} on an int grid."""
+    import numpy as np
+    b = labels.index(BLACK); w = labels.index(WHITE)
+    out = np.full_like(S, 2, dtype=np.uint8)
+    out[S == b] = 0
+    out[S == w] = 1
+    return out
+
+def hamming_fraction(A, B):
+    import numpy as np
+    return float((A != B).sum()) / A.size
+
+def parse_perturb_spec(spec_str):
+    """
+    'block:cx=10,cy=10,w=5,h=5,mode=rand,steps=100,base_step=-100'
+    modes: rand, flipbw, setwhite, setblack
+    """
+    out = {}
+    if not spec_str: return None
+    kind, *rest = spec_str.split(":", 1)
+    out["kind"] = kind
+    if rest:
+        for kv in rest[0].split(","):
+            if not kv: continue
+            k, v = kv.split("=")
+            if k in {"cx","cy","w","h","steps","base_step"}:
+                out[k] = int(v)
+            else:
+                out[k] = v
+    # defaults
+    out.setdefault("mode", "rand")
+    out.setdefault("steps", 100)
+    out.setdefault("base_step", -100)
+    return out
+
+def apply_block_perturb(S, labels, cx, cy, w, h, mode="rand", rng=None):
+    """Return a perturbed copy of S."""
+    import numpy as np
+    H, W = S.shape
+    x0 = max(0, cx - w//2); x1 = min(W, x0 + w)
+    y0 = max(0, cy - h//2); y1 = min(H, y0 + h)
+    P = S.copy()
+    b = labels.index(BLACK); widx = labels.index(WHITE)
+    rng = np.random.default_rng() if rng is None else rng
+
+    if mode == "rand":
+        P[y0:y1, x0:x1] = rng.integers(0, len(labels), size=(y1-y0, x1-x0))
+    elif mode == "flipbw":
+        blk = (P[y0:y1, x0:x1] == b)
+        wht = (P[y0:y1, x0:x1] == widx)
+        P[y0:y1, x0:x1][blk] = widx
+        P[y0:y1, x0:x1][wht] = b
+    elif mode == "setwhite":
+        P[y0:y1, x0:x1] = widx
+    elif mode == "setblack":
+        P[y0:y1, x0:x1] = b
+    return P
+
 # ---- Cycle detection ----
 def detect_cycle(states):
     """Return dict with preperiod/period if a repeated state is found; else None."""
@@ -513,9 +617,6 @@ def plot_ring_radius_hist(radii, out_png: Path, title="Ring radius histogram"):
     plt.tight_layout(); plt.savefig(out_png, dpi=150, bbox_inches="tight"); plt.close()
     print(f"[saved] {out_png}")
 
-# ---- Torus (wrap) simulation using learned positional rule ----
-from process import neigh_key_wrap, apply_rule_wrap  # added in process.py
-
 def learn_rule_wrap_ready(S, T, r=1):
     """Learn rule using *wrapped* keys so we can later simulate on a torus."""
     H, W = S.shape
@@ -535,11 +636,118 @@ def simulate_wrap(initial, rule, r=1, steps=50):
         states.append(apply_rule_wrap(states[-1], rule, r=r))
     return states
 
+# --- Phase rulebooks (exact) -----------------------------------------------
+
+def region_of(i, j, H, W):
+    if (i in (0, H-1)) and (j in (0, W-1)): return "corner"
+    if (i in (0, H-1)) or (j in (0, W-1)):  return "edge"
+    return "interior"
+
+def _scope_fn(split, region, H, W):
+    if split == "none" or region == "all":
+        return lambda i, j: True
+    if split == "edge":
+        if region == "interior":
+            return lambda i, j: (i not in (0, H-1) and j not in (0, W-1))
+        if region == "edge":
+            return lambda i, j: (i in (0, H-1) or j in (0, W-1))
+    if split == "corner_edge":
+        if region == "corner":
+            return lambda i, j: (i in (0, H-1) and j in (0, W-1))
+        if region == "edge":
+            return lambda i, j: ((i in (0, H-1) or j in (0, W-1)) and not (i in (0, H-1) and j in (0, W-1)))
+        if region == "interior":
+            return lambda i, j: (i not in (0, H-1) and j not in (0, W-1))
+    return lambda i, j: True
+
+def build_phase_rulebooks(states, r=1, k=2, split="none"):
+    """
+    Build phase-conditioned rulebooks from a single run (use run_0 for coherence).
+    Returns dict: {'meta': {...}, 'rules': {phase: {region: {neigh_key: out_label}}}}
+    split in {'none','edge','corner_edge'}
+    """
+    H, W = states[0].shape
+    regions = ["all"] if split == "none" else (["interior","edge"] if split=="edge" else ["interior","edge","corner"])
+    rules = {phase: {reg: {} for reg in regions} for phase in range(k)}
+    conflicts = 0
+
+    for t in range(len(states)-1):
+        phase = t % k
+        S, T = states[t], states[t+1]
+        for i in range(H):
+            for j in range(W):
+                for reg in regions:
+                    if split != "none":
+                        if not _scope_fn(split, reg, H, W)(i, j):
+                            continue
+                    key = neigh_key(S, i, j, r=r)  # includes OOB=-1 in your neigh_key
+                    y = int(T[i, j])
+                    book = rules[phase][reg]
+                    if key in book and book[key] != y:
+                        conflicts += 1
+                    else:
+                        book[key] = y
+    return {
+        "meta": {"radius": r, "k": k, "split": split, "H": H, "W": W, "conflicts": conflicts},
+        "rules": rules
+    }
+
+def export_rulebooks(rb, outdir: Path, name="rulebooks"):
+    outdir.mkdir(parents=True, exist_ok=True)
+    p = outdir / f"{name}.json"
+    import json
+    # convert keys to json (already strings); values are ints
+    p.write_text(json.dumps(rb, indent=2))
+    print(f"[saved] {p}")
+
+def load_rulebooks(path: Path):
+    import json
+    rb = json.loads(Path(path).read_text())
+    return rb
+
+def simulate_rulebook(initial, rb, steps=100, fallback="copy"):
+    """
+    Roll forward using exact phase rulebooks.
+      initial: H×W int array
+      rb: dict from build/load_rulebooks
+      steps: number of steps to simulate
+      fallback: behavior when key missing: 'copy' (default) or 'error'
+    Returns list of states [S0, S1, ..., Ssteps]
+    """
+    r = rb["meta"]["radius"]; k = rb["meta"]["k"]; split = rb["meta"]["split"]
+    H, W = initial.shape
+    regions = ["all"] if split == "none" else (["interior","edge"] if split=="edge" else ["interior","edge","corner"])
+    states = [initial.copy()]
+    for t in range(steps):
+        phase = t % k
+        S = states[-1]
+        T = np.empty_like(S)
+        # choose which region book applies per cell
+        for i in range(H):
+            for j in range(W):
+                reg = "all"
+                if split != "none":
+                    reg = region_of(i, j, H, W)
+                key = neigh_key(S, i, j, r=r)
+                book = rb["rules"][str(phase)][reg] if isinstance(rb["rules"], dict) and str(phase) in rb["rules"] else rb["rules"][phase][reg]
+                if key in book:
+                    T[i, j] = book[key]
+                else:
+                    if fallback == "copy":
+                        T[i, j] = S[i, j]
+                    else:
+                        raise KeyError(f"Unseen neighborhood at t={t}, (i,j)=({i},{j}), phase={phase}, region={reg}")
+        states.append(T)
+    return states
+
 # --------------- CLI runners ---------------
 
-def run_analysis(run_dirs, outdir: Path, radius=1, tests=None,
-                 period_scan_mode="", train_clf=False, clf_period=None,
-                 do_cycle=True, do_ring=True, do_torus=True):
+def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode="",
+                 train_clf=False, clf_period=None, do_cycle=False, do_ring=False, do_torus=False,
+                 do_autocorr=False, do_near_cycle=False, near_cycle_maxlag=64, near_cycle_eps=0.01,
+                 perturb_spec="", simulate_spec="", sim_steps=0, sim_save_every=0, sim_png=False, sim_seed_colors="label_colors.json",
+                 build_rulebook=False, rb_k=None, rb_split="none", rb_name="rulebooks",
+                 simulate_rulebook_from="", rb_steps=0, rb_fallback="copy", rb_png=False, rb_save_every=0, rb_colors="label_colors.json"):
 
     tests = set((tests or "").split(",")) if tests else set()
     all_states, labels, label_to_idx, per_run = load_runs_encoded(run_dirs)
@@ -624,6 +832,210 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None,
         except Exception as e:
             print("[warn] plotting failed (viz.py not present or colors missing):", e)
 
+    # ---------------- Simulate-only rollout ----------------
+    if simulate_spec:
+        # load classifier + meta
+        try:
+            import joblib
+            clf = joblib.load(outdir / "classifier.joblib")
+            meta = json.loads((outdir / "classifier_meta.json").read_text())
+        except Exception as e:
+            print("[error] simulate requires classifier.joblib + classifier_meta.json in reports/:", e)
+            return
+
+        # decide initial
+        init = choose_initial_state(simulate_spec, per_run, labels, label_to_idx)
+        steps = int(sim_steps) if sim_steps else 0
+        if steps <= 0:
+            print("[warn] --simulate provided but --sim-steps not set (>0). Nothing to do.")
+            return
+
+        sim_states = simulate_with_classifier(init, clf, meta, steps=steps)
+
+        # save JSONs
+        save_sequence_json(sim_states, labels, outdir, prefix="simulate_", save_every=int(sim_save_every))
+
+        # optional PNG panel
+        if sim_png:
+            save_sequence_png(sim_states, labels, outdir, prefix="simulate_", colors_path=sim_seed_colors)
+
+        # also dump a fractions CSV for the rollout
+        try:
+            import numpy as np, pandas as pd
+            H, W = sim_states[0].shape
+            total = H*W
+            rows = []
+            for t, S in enumerate(sim_states):
+                vals, counts = np.unique(S, return_counts=True)
+                freq = dict(zip(vals, counts))
+                for idx, lab in enumerate(labels):
+                    rows.append([t, lab, freq.get(idx, 0)/total])
+            import csv
+            with open(outdir / "simulate_fractions.csv", "w", newline="") as f:
+                w = csv.writer(f); w.writerow(["step","label","fraction"]); w.writerows(rows)
+            print(f"[saved] {outdir/'simulate_fractions.csv'}")
+        except Exception as e:
+            print("[warn] could not write simulate_fractions.csv:", e)
+
+    # -------- Build and export rulebooks (exact) --------
+    if build_rulebook:
+        if not per_run:
+            print("[error] need at least one run to build rulebooks")
+            return
+        k = int(rb_k) if rb_k else 2
+        rb = build_phase_rulebooks(per_run[0], r=radius, k=k, split=rb_split)
+        export_rulebooks(rb, outdir, name=rb_name)
+        print(f"[rulebooks] conflicts while building: {rb['meta']['conflicts']}")
+
+    # -------- Simulate using rulebooks --------
+    if simulate_rulebook_from:
+        # load rulebooks (prefer the just-saved one if present)
+        rb_path = outdir / f"{rb_name}.json"
+        if not rb_path.exists():
+            print(f"[error] missing {rb_path}. Build with --build-rulebook first or set --rb-name to existing file.")
+            return
+        rb = load_rulebooks(rb_path)
+
+        # pick initial
+        init = choose_initial_state(simulate_rulebook_from, per_run, labels, label_to_idx)
+        steps = int(rb_steps) if rb_steps else 0
+        if steps <= 0:
+            print("[warn] --simulate-rulebook provided but --rb-steps not set (>0). Nothing to do.")
+            return
+
+        sim_states = simulate_rulebook(init, rb, steps=steps, fallback=rb_fallback)
+
+        # save JSON snapshots
+        save_sequence_json(sim_states, labels, outdir, prefix="rb_sim_", save_every=int(rb_save_every))
+        # optional PNG montage
+        if rb_png:
+            save_sequence_png(sim_states, labels, outdir, prefix="rb_sim_", colors_path=rb_colors)
+
+        # fractions CSV for the rollout
+        try:
+            H, W = sim_states[0].shape
+            total = H*W
+            rows = []
+            for t, S in enumerate(sim_states):
+                vals, counts = np.unique(S, return_counts=True)
+                freq = dict(zip(vals, counts))
+                for idx, lab in enumerate(labels):
+                    rows.append([t, lab, freq.get(idx, 0)/total])
+            import csv
+            with open(outdir / "rb_simulate_fractions.csv", "w", newline="") as f:
+                w = csv.writer(f); w.writerow(["step","label","fraction"]); w.writerows(rows)
+            print(f"[saved] {outdir/'rb_simulate_fractions.csv'}")
+        except Exception as e:
+            print("[warn] could not write rb_simulate_fractions.csv:", e)
+
+
+# --- simulate-only helpers (surrogate rollout) ---
+
+def encode_by_global_labels(grid_labels_2d, label_to_idx):
+    """Take a raw 2D grid of label strings and encode to ints with a global map."""
+    import numpy as np
+    H, W = len(grid_labels_2d), len(grid_labels_2d[0])
+    S = np.empty((H, W), dtype=np.int32)
+    for i in range(H):
+        for j in range(W):
+            S[i, j] = label_to_idx[grid_labels_2d[i][j]]
+    return S
+
+def decode_by_global_labels(S_int, labels):
+    """Decode an int grid back to label strings."""
+    H, W = S_int.shape
+    return [[labels[int(S_int[i, j])] for j in range(W)] for i in range(H)]
+
+def load_seed_from_file(path, labels, label_to_idx):
+    """Load a JSON seed (like the captured step_XXXX.json) and encode by global labels."""
+    from pathlib import Path
+    import json
+    grid = json.loads(Path(path).read_text())
+    return encode_by_global_labels(grid, label_to_idx)
+
+def choose_initial_state(sim_spec, per_run_states, labels, label_to_idx):
+    """
+    sim_spec formats:
+      - 'run:idx=<k>'      → use per_run_states[0][k]
+      - 'run:last'         → last state from run_0
+      - 'file:<path.json>' → load a seed JSON and encode
+    """
+    if not sim_spec:
+        # default: first frame of first run
+        return per_run_states[0][0]
+
+    if sim_spec.startswith("run:"):
+        arg = sim_spec[4:]
+        if arg == "last":
+            return per_run_states[0][-1]
+        if arg.startswith("idx="):
+            k = int(arg.split("=", 1)[1])
+            k = max(0, min(k, len(per_run_states[0]) - 1))
+            return per_run_states[0][k]
+        raise ValueError(f"Bad run spec: {sim_spec}")
+
+    if sim_spec.startswith("file:"):
+        path = sim_spec[5:]
+        return load_seed_from_file(path, labels, label_to_idx)
+
+    raise ValueError(f"Unrecognized simulate spec: {sim_spec}")
+
+def save_sequence_json(states, labels, outdir: Path, prefix="sim_", save_every=0):
+    """
+    Save decoded states as JSON label grids.
+    If save_every==0: saves only final state → <prefix>final.json
+    If save_every>0 : saves every k steps and final.
+    """
+    import json
+    outdir.mkdir(parents=True, exist_ok=True)
+    if save_every and save_every > 0:
+        for t, S in enumerate(states):
+            if t % save_every == 0:
+                path = outdir / f"{prefix}t{t:04d}.json"
+                path.write_text(json.dumps(decode_by_global_labels(S, labels)))
+        # always save final too (even if it aligned with save_every)
+        path = outdir / f"{prefix}final.json"
+        path.write_text(json.dumps(decode_by_global_labels(states[-1], labels)))
+        return
+
+    # only final
+    path = outdir / f"{prefix}final.json"
+    path.write_text(json.dumps(decode_by_global_labels(states[-1], labels)))
+
+def save_sequence_png(states, labels, outdir: Path, prefix="sim_", steps_to_plot=None, colors_path="label_colors.json"):
+    """
+    Save a grid of snapshots as PNG using viz.py if available.
+    If steps_to_plot is None, picks ~15 evenly spaced snapshots including 0 and final.
+    """
+    try:
+        from viz import load_label_colors, plot_sequence
+        import numpy as np
+        colors = load_label_colors(colors_path)
+        if steps_to_plot is None:
+            N = min(15, len(states))
+            steps_to_plot = np.linspace(0, len(states) - 1, N, dtype=int).tolist()
+        outdir.mkdir(parents=True, exist_ok=True)
+        # plot_sequence shows the figure; we want to save instead:
+        # reimplement a small saver
+        from matplotlib.colors import ListedColormap
+        import matplotlib.pyplot as plt
+        cmap = ListedColormap([colors.get(lab, "#808080") for lab in labels], name="bbx")
+        cols = 5
+        rows = -(-len(steps_to_plot)//cols)
+        plt.figure(figsize=(12, 8))
+        for k, t in enumerate(steps_to_plot):
+            ax = plt.subplot(rows, cols, k+1)
+            ax.imshow(states[t], cmap=cmap, interpolation="nearest", vmin=0, vmax=len(labels)-1)
+            ax.set_title(f"t={t}", fontsize=9); ax.axis("off")
+        plt.tight_layout()
+        p = outdir / f"{prefix}snapshots.png"
+        plt.savefig(p, dpi=150, bbox_inches="tight")
+        plt.close()
+        print(f"[saved] {p}")
+    except Exception as e:
+        print("[warn] PNG sequence save skipped (viz.py/colors missing):", e)
+
+
     # --- Shape diagnostics (ring/border evidence) ---
     if "shape" in tests or not tests:
         # Use the first run for clean geometry pictures (you can aggregate later)
@@ -701,6 +1113,141 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None,
         plt.xlabel("step"); plt.ylabel("black fraction"); plt.title("Torus sim (wrap) — black fraction")
         plt.tight_layout(); plt.savefig(outdir / "torus_black_frac.png", dpi=150, bbox_inches="tight"); plt.close()
         print("[saved] torus_black_frac.csv/.png")
+
+# ---------------- Autocorrelation ----------------
+    if do_autocorr and per_run:
+        import numpy as np
+        run = per_run[0]
+        fr = fractions_time_series(run, labels)
+        ring = ring_radius_series(run, labels)
+
+        # AC for black & white fractions and ring radius
+        ac_black = autocorr_1d(fr.get(BLACK, np.zeros(len(run))), max_lag=128)
+        ac_white = autocorr_1d(fr.get(WHITE, np.zeros(len(run))), max_lag=128)
+        ac_ring  = autocorr_1d(ring, max_lag=128)
+
+        save_json({
+            "lags": list(range(len(ac_black))),
+            "ac_black": ac_black.tolist(),
+            "ac_white": ac_white.tolist(),
+            "ac_ring_radius": ac_ring.tolist()
+        }, outdir / "autocorr_run0.json")
+        print(f"[saved] {outdir/'autocorr_run0.json'}")
+
+        # quick PNGs
+        for name, ac in [("black", ac_black), ("white", ac_white), ("ring", ac_ring)]:
+            plt.figure(); plt.plot(range(len(ac)), ac, marker='.')
+            plt.xlabel("lag"); plt.ylabel("autocorr"); plt.title(f"Autocorr ({name})")
+            p = outdir / f"autocorr_{name}.png"
+            plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close()
+            print(f"[saved] {p}")
+
+    # ---------------- Near-cycle detection ----------------
+    if do_near_cycle and per_run:
+        run = per_run[0]
+        import numpy as np
+        # collapse to B/W/Other to ignore micro-color shuffles
+        collapsed = [collapse_bw_other(S, labels) for S in run]
+        hits = []
+        mins = []
+        for lag in range(1, near_cycle_maxlag+1):
+            ds = []
+            for t in range(lag, len(collapsed)):
+                d = hamming_fraction(collapsed[t], collapsed[t-lag])
+                ds.append(d)
+            if ds:
+                dmin = float(np.min(ds))
+                mins.append({"lag": lag, "min_mismatch_frac": dmin})
+                if dmin <= near_cycle_eps:
+                    hits.append({"lag": lag, "best_mismatch_frac": dmin})
+        save_json({"threshold": near_cycle_eps, "maxlag": near_cycle_maxlag,
+                   "hits": hits, "min_by_lag": mins}, outdir / "near_cycle_report.json")
+        rows = [["lag","min_mismatch_frac"]] + [[m["lag"], m["min_mismatch_frac"]] for m in mins]
+        save_csv(rows, outdir / "near_cycle_min_by_lag.csv")
+        print(f"[saved] {outdir/'near_cycle_report.json'}, {outdir/'near_cycle_min_by_lag.csv'}")
+
+        # plot min mismatch vs lag
+        if mins:
+            lags = [m["lag"] for m in mins]; vals = [m["min_mismatch_frac"] for m in mins]
+            plt.figure(); plt.plot(lags, vals, marker='.')
+            plt.axhline(near_cycle_eps, color='r', linestyle='--', label=f"threshold={near_cycle_eps}")
+            plt.xlabel("lag"); plt.ylabel("min mismatch (B/W/Other)"); plt.legend()
+            p = outdir / "near_cycle_min_by_lag.png"
+            plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close()
+            print(f"[saved] {p}")
+
+    # ---------------- Perturbation experiment ----------------
+    if perturb_spec:
+        spec = parse_perturb_spec(perturb_spec)
+        if not per_run:
+            print("[warn] no run available for perturbation")
+        else:
+            # need classifier + meta (exported earlier with --train-clf)
+            try:
+                import joblib
+                clf = joblib.load(outdir / "classifier.joblib")
+                meta = json.loads((outdir / "classifier_meta.json").read_text())
+            except Exception as e:
+                print("[error] perturbation requires classifier.joblib + classifier_meta.json in reports/:", e)
+                return
+
+            run = per_run[0]
+            base_step = spec.get("base_step", -100)
+            base_idx = base_step if base_step >= 0 else (len(run) + base_step)
+            base_idx = max(0, min(base_idx, len(run)-1))
+            base = run[base_idx]
+
+            # make perturbed initial
+            H, W = base.shape
+            cx = spec.get("cx", W//2)
+            cy = spec.get("cy", H//2)
+            w  = spec.get("w",  5)
+            h  = spec.get("h",  5)
+            mode = spec.get("mode", "rand")
+            steps = spec.get("steps", 100)
+
+            pert0 = apply_block_perturb(base, labels, cx, cy, w, h, mode=mode)
+
+            # simulate both trajectories (reference vs perturbed)
+            ref_states  = simulate_with_classifier(base, clf, meta, steps=steps)
+            pert_states = simulate_with_classifier(pert0, clf, meta, steps=steps)
+
+            # metrics: black/white fractions and ring radius diffs vs reference
+            fr_ref = fractions_time_series(ref_states, labels)
+            fr_pt  = fractions_time_series(pert_states, labels)
+            ring_ref = ring_radius_series(ref_states, labels)
+            ring_pt  = ring_radius_series(pert_states, labels)
+
+            rows = [["t","black_ref","black_pert","white_ref","white_pert","ring_ref","ring_pert",
+                     "d_black","d_white","d_ring"]]
+            for t in range(len(ref_states)):
+                b_ref = fr_ref[BLACK][t]; b_pt = fr_pt[BLACK][t]
+                w_ref = fr_ref[WHITE][t]; w_pt = fr_pt[WHITE][t]
+                rr = int(ring_ref[t]); rp = int(ring_pt[t])
+                rows.append([t, b_ref, b_pt, w_ref, w_pt, rr, rp,
+                             b_pt-b_ref, w_pt-w_ref, rp-rr])
+
+            save_csv(rows, outdir / "perturb_recovery.csv")
+            print(f"[saved] {outdir/'perturb_recovery.csv'}")
+
+            # quick plots
+            # (a) delta black/white
+            ts = [r[0] for r in rows[1:]]
+            dB = [r[7] for r in rows[1:]]
+            dW = [r[8] for r in rows[1:]]
+            plt.figure(); plt.plot(ts, dB, label="Δ black"); plt.plot(ts, dW, label="Δ white")
+            plt.axhline(0, color='k', linewidth=0.5)
+            plt.xlabel("t"); plt.ylabel("fraction diff (pert - ref)"); plt.legend()
+            p = outdir / "perturb_recovery_dBW.png"
+            plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(); print(f"[saved] {p}")
+
+            # (b) delta ring radius
+            dR = [r[9] for r in rows[1:]]
+            plt.figure(); plt.plot(ts, dR, label="Δ ring radius")
+            plt.axhline(0, color='k', linewidth=0.5)
+            plt.xlabel("t"); plt.ylabel("cells"); plt.title("Recovery of ring radius")
+            p = outdir / "perturb_recovery_dRing.png"
+            plt.savefig(p, dpi=150, bbox_inches="tight"); plt.close(); print(f"[saved] {p}")
 
     print("[done] analyze.py finished.")
 
@@ -859,6 +1406,14 @@ def main():
     ap.add_argument("--period-scan", default="")
     ap.add_argument("--train-clf", action="store_true")
     ap.add_argument("--clf-period", default="")
+    ap.add_argument("--do-cycle", default="")
+    ap.add_argument("--do-ring", default="")
+    ap.add_argument("--do-torus", defaults="")
+    ap.add_argument("--autocorr", action="store_true", help="Compute autocorrelation for black/white fractions and ring radius")
+    ap.add_argument("--near-cycle", action="store_true", help="Near-cycle detection on B/W/Other-collapsed states")
+    ap.add_argument("--near-cycle-maxlag", type=int, default=64, help="Max lag to scan for near-cycles (default 64)")
+    ap.add_argument("--near-cycle-eps", type=float, default=0.01, help="Mismatch fraction threshold for a near-cycle hit (default 1%)")
+    ap.add_argument("--perturb", default="", help="Perturbation spec, e.g. 'block:cx=10,cy=10,w=5,h=5,mode=rand,steps=100,base_step=-100'")
     args = ap.parse_args()
 
     outdir = ensure_dir(Path(args.out))
@@ -868,6 +1423,14 @@ def main():
         tests=args.tests,
         period_scan_mode=args["period_scan"] if isinstance(args, dict) else args.period_scan,
         train_clf=args.train_clf,
-        clf_period=args.clf_period
+        clf_period=args.clf_period,
+        do_cycle=args.do_cycle,
+        do_ring=args.do_ring,
+        do_torus=args.do_torus,
+        do_autocorr=args.autocorr,
+        do_near_cycle=args.near_cycle,
+        near_cycle_maxlag=args.near_cycle_maxlag,
+        near_cycle_eps=args.near_cycle_eps,
+        perturb_spec=args.perturb
     )
 
