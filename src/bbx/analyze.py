@@ -14,6 +14,12 @@ import pandas as pd
 import hashlib
 
 from .process import neigh_key_wrap, apply_rule_wrap
+from .best_k import summarise_period_scan
+
+# Set bg color to gray because "mex" is white and invisible.
+plt.rcParams['axes.facecolor']   = '#cccccc' 
+plt.rcParams['figure.facecolor'] = '#cccccc'
+plt.rcParams['savefig.facecolor'] = '#cccccc'
 
 
 # ---- import local helpers from process.py ----
@@ -72,7 +78,7 @@ def load_runs_encoded(run_dirs):
     all_states = [arr for run in per_run_enc for arr in run]
     return all_states, labels, label_to_idx, per_run_enc
 
-def period_scan(per_run_states, r=1, max_k=12, split="none"):
+def period_scan(per_run_states, r=1, max_k=32, split="none"):
     """
     Scan time period k (2..max_k) and optionally split by region.
     split ∈ {"none","edge","corner_edge"}.
@@ -333,29 +339,49 @@ def plot_mismatch_curve(states, r=1, outdir: Path = None, prefix=""):
         print(f"[saved] {p}")
     plt.close()
 
-def plot_label_histogram(states, labels, outdir: Path = None, prefix=""):
-    """Histogram of labels in final state vs initial state."""
-    init = states[0].ravel()
-    final = states[-1].ravel()
-    L = len(labels)
-    n_init = np.bincount(init, minlength=L)
-    n_final = np.bincount(final, minlength=L)
+def plot_label_histogram(states, labels, colors, outdir: Path = None, prefix=""):
+    title="Label histogram"
+    import matplotlib.pyplot as plt
+    import numpy as np
 
-    x = np.arange(L)
-    width = 0.38
-    plt.figure(figsize=(10,4))
-    plt.bar(x - width/2, n_init, width, label="initial")
-    plt.bar(x + width/2, n_final, width, label="final")
-    plt.xticks(x, labels, rotation=45, ha="right")
-    plt.ylabel("count")
-    plt.title("Label histogram (initial vs final)")
-    plt.legend()
-    plt.tight_layout()
+    init_counts = np.bincount(states[0].ravel(), minlength=len(labels))
+    final_counts = np.bincount(states[-1].ravel(), minlength=len(labels))
+
+    # Sort labels by final counts
+    order = np.argsort(-final_counts)  # descending
+    labels_sorted = [labels[i] for i in order]
+    init_sorted = init_counts[order]
+    final_sorted = final_counts[order]
+
+    x = np.arange(len(labels_sorted))
+    width = 0.35
+
+    fig, ax = plt.subplots(figsize=(10,5))
+    bars1 = ax.bar(x - width/2, init_sorted, width, label="Initial",
+                   color=[colors.get(lab, "#808080") for lab in labels_sorted])
+    bars2 = ax.bar(x + width/2, final_sorted, width, label="Final",
+                   color=[colors.get(lab, "#808080") for lab in labels_sorted])
+
+    # Add text labels on top of bars
+    for bars in [bars1, bars2]:
+        for b in bars:
+            ax.text(b.get_x() + b.get_width()/2, b.get_height(),
+                    f"{int(b.get_height())}", ha="center", va="bottom", fontsize=8)
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels_sorted)
+    ax.set_ylabel("Count")
+    ax.set_title(prefix + title)
+    ax.legend()
+
+    fig.tight_layout()
     if outdir:
-        p = outdir / f"{prefix}label_hist_init_final.png"
-        plt.savefig(p, dpi=150)
-        print(f"[saved] {p}")
-    plt.close()
+        outpath = Path(outdir) / f"{prefix}label_histogram.png"
+        fig.savefig(outpath, dpi=150, facecolor="#f0f0f0")
+        print(f"[saved] {outpath}")
+    else:
+        plt.show()
+
 
 # ----- SHAPE DIAGNOSTICS (ring/border evidence) -----
 
@@ -768,8 +794,10 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
 
     # Plots on first run (for a concrete picture)
     if per_run:
-        plot_mismatch_curve(per_run[0], r=radius, outdir=outdir, prefix="run0_")
-        plot_label_histogram(per_run[0], labels, outdir=outdir, prefix="run0_")
+        from .viz import load_label_colors, plot_sequence
+        colors = load_label_colors("label_colors.json")
+        plot_mismatch_curve(per_run[0], r=radius, outdir=outdir, prefix="")
+        plot_label_histogram(per_run[0], labels, colors, outdir=outdir, prefix="")
 
     # Consistency across runs
     try:
@@ -809,11 +837,15 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
         print(f"[saved] {outdir/'totalistic_vs_positional.csv'}")
 
     if period_scan_mode:
-        modes = period_scan_mode.split(",")
+        modes = [m.strip() for m in period_scan_mode.split(",") if m.strip()]
         for mode in modes:
-            rows = period_scan(per_run, r=radius, max_k=12, split=mode)
+            rows = period_scan(per_run, r=radius, max_k=32, split=mode)
             save_csv(rows, outdir / f"period_scan_{mode}.csv")
             print(f"[saved] {outdir/f'period_scan_{mode}.csv'}")
+        try:
+            summarise_period_scan(outdir, modes)
+        except Exception as e:
+            print(f"[warn] period scan summary failed: {e}")
 
     if train_clf:
         # pick a k: use provided clf_period, or guess small (e.g. 2 or from your period_scan)
@@ -1433,4 +1465,3 @@ def main():
         near_cycle_eps=args.near_cycle_eps,
         perturb_spec=args.perturb
     )
-

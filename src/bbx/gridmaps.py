@@ -7,6 +7,7 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from .process import load_run_encoded  # your helper
+from .generate_grid import sequence_panel
 # If you want label colors: from .viz import load_label_colors
 
 BLACK, WHITE = "gru", "mex"
@@ -175,66 +176,130 @@ def _save_full_set(arr, outstem: Path, title: str, cmap="viridis",
     # CSV for the base array
     _save_csv(arr, outstem.with_suffix(".csv"), outstem.stem)
 
-def run_gridmaps(run_dirs, outdir):
-    runs, labels = stack_runs(run_dirs)
+def _parse_window(win_str, T):
+    # win_str: "", "start:end", or "last:N"
+    if not win_str:
+        return 0, T
+    if win_str.startswith("last:"):
+        N = int(win_str.split(":")[1])
+        return max(0, T-N), T
+    # "start:end"
+    s, e = win_str.split(":")
+    s = int(s) if s else 0
+    e = int(e) if e else T
+    s = max(0, min(s, T))
+    e = max(0, min(e, T))
+    if e <= s: e = min(T, s+1)
+    return s, e
+
+def _slice_states(states, start, end, phase=-1, k=2):
+    # returns a list of states restricted to time window and (optional) phase
+    idxs = range(start, end)
+    if phase >= 0:
+        idxs = [t for t in idxs if (t % k) == phase]
+    return [states[t] for t in idxs]
+
+
+def run_gridmaps(run_dirs, outdir, win="", phase=-1, k=2,
+                 sequence=False, sequence_steps="", sequence_file="",
+                 colors_path="label_colors.json", sequence_show=False):
+    runs, labels = stack_runs(run_dirs)  # your existing helper
+    if not runs:
+        raise ValueError("No runs supplied to gridmaps.")
     L = len(labels)
     black_idx = labels.index(BLACK) if BLACK in labels else 0
     white_idx = labels.index(WHITE) if WHITE in labels else 1
 
-    # Aggregate across runs by averaging the per-run maps
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+
     def avg_over_runs(func, *args, **kwargs):
         mats = []
         for states in runs:
-            mats.append(func(states, *args, **kwargs))
-        return np.mean(mats, axis=0)
+            T = len(states)
+            s, e = _parse_window(win, T)
+            states_win = _slice_states(states, s, e, phase=phase, k=k)
+            if len(states_win) == 0:
+                continue
+            mats.append(func(states_win, *args, **kwargs))
+        return np.mean(mats, axis=0) if mats else None
 
-    outdir = Path(outdir)
-
+    # Choose sensible fixed scales where appropriate
+    # change rate: [0,1], frac_*: [0,1], entropy: [0, log2(L)], flip rate: [0,1]
     # 1) Change rate
     chg = avg_over_runs(per_cell_change_rate)
-    _save_full_set(chg, outdir / "grid_change_rate", "Per-cell change rate",
-                   cmap="coolwarm", clip=True, dev=True, force_01=True)
+    if chg is not None:
+        _save_csv(chg,  outdir/"grid_change_rate.csv", "change_rate")
+        _save_heatmap(chg, outdir/"grid_change_rate.png",
+                      f"Per-cell change rate (win={win}, phase={phase})",
+                      vmin=0.0, vmax=0.0020)
 
-    # 2) Black / White occupancy (fractions in [0,1])
+    # 2) Black / White occupancy
     frac_black = avg_over_runs(per_cell_label_fraction, black_idx)
     frac_white = avg_over_runs(per_cell_label_fraction, white_idx)
-    _save_full_set(frac_black, outdir / "grid_frac_black",
-                   f"Fraction black ({BLACK})", cmap="magma",
-                   clip=True, dev=True, force_01=True)
-    _save_full_set(frac_white, outdir / "grid_frac_white",
-                   f"Fraction white ({WHITE})", cmap="bone",
-                   clip=True, dev=True, force_01=True)
+    if frac_black is not None:
+        _save_csv(frac_black, outdir/"grid_frac_black.csv", "frac_black")
+        _save_heatmap(frac_black, outdir/"grid_frac_black.png",
+                      f"Fraction black ({BLACK}) (win={win}, phase={phase})",
+                      vmin=0.05, vmax=0.30)
 
-    # 3) Entropy (bits). Range is data-driven; don’t force 0–1.
+    if frac_white is not None:
+        _save_csv(frac_white, outdir/"grid_frac_white.csv", "frac_white")
+        _save_heatmap(frac_white, outdir/"grid_frac_white.png",
+                      f"Fraction white ({WHITE}) (win={win}, phase={phase})",
+                      vmin=0.00, vmax=0.6)
+
+    # 2b) Contrast map
+    if frac_black is not None and frac_white is not None:
+        contrast = frac_black - frac_white
+        _save_csv(contrast, outdir/"grid_black_minus_white.csv", "black_minus_white")
+        _save_heatmap(contrast, outdir/"grid_black_minus_white.png",
+                      f"P(black) − P(white) (win={win}, phase={phase})",
+                      vmin=-0.07, vmax=1, cmap="coolwarm")
+
+    # 3) Entropy
     ent = avg_over_runs(per_cell_entropy, L)
-    _save_full_set(ent, outdir / "grid_entropy_bits",
-                   "Per-cell label entropy (bits)", cmap="viridis",
-                   clip=True, dev=True, force_01=False)
+    if ent is not None:
+        _save_csv(ent, outdir/"grid_entropy_bits.csv", "entropy_bits")
+        _save_heatmap(ent, outdir/"grid_entropy_bits.png",
+                      f"Per-cell label entropy (bits) (win={win}, phase={phase})",
+                      vmin=0.00, vmax=3.0)
 
-    # 4) Phase flip rate (k=2), in [0,1]
-    flips = avg_over_runs(per_cell_phase_flip_rate, 2)
-    _save_full_set(flips, outdir / "grid_phase_flip_rate",
-                   "Phase flip rate (k=2)", cmap="coolwarm",
-                   clip=True, dev=True, force_01=True)
-
-    # 5) Time to black (first run; not averaged)
-    ttb = per_cell_time_to_black(runs[0], black_idx)
-    _save_full_set(ttb, outdir / "grid_time_to_black",
-                   "Time to black (first run)", cmap="plasma",
-                   clip=True, dev=True, force_01=False)
-
-    # 6) Conditional entropy H(Y_{t+1}|Y_t) (bits)
+    # 4) Conditional entropy
     Hc = avg_over_runs(per_cell_conditional_entropy, L)
-    _save_full_set(Hc, outdir / "grid_cond_entropy_bits",
-                   "Conditional entropy H(Y_{t+1}|Y_t) (bits)", cmap="viridis",
-                   clip=True, dev=True, force_01=False)
+    if Hc is not None:
+        _save_csv(Hc,  outdir/"grid_cond_entropy_bits.csv", "H_next_given_current_bits")
+        _save_heatmap(Hc, outdir/"grid_cond_entropy_bits.png",
+                      f"H(Yₜ₊₁|Yₜ) (bits) (win={win}, phase={phase})",
+                      vmin=0.0, vmax=0.12)
 
-    # 7) Phase-split change maps (first run for clarity)
-    rates = per_cell_change_rate_by_phase(runs[0], 2)  # shape (2,H,W)
-    for p in range(rates.shape[0]):
-        _save_full_set(rates[p], outdir / f"grid_change_rate_phase{p}",
-                       f"Per-cell change rate (phase {p})", cmap="coolwarm",
-                       clip=True, dev=True, force_01=True)
+    # 5) Phase flip rate (if you want it phase-independent, compute with phase=-1; for clarity keep k=2)
+    flips = avg_over_runs(per_cell_phase_flip_rate, 2)
+    if flips is not None:
+        _save_csv(flips, outdir/"grid_phase_flip_rate.csv", "phase_flip_rate")
+        _save_heatmap(flips, outdir/"grid_phase_flip_rate.png",
+                      f"Phase flip rate (k=2) (win={win}, phase={phase})",
+                      vmin=0.0, vmax=0.015, cmap="coolwarm")
+
+    # 6) Time to black (use first run + same window)
+    states0 = runs[0]
+    s0, e0 = _parse_window(win, len(states0))
+    states0_win = _slice_states(states0, s0, e0, phase=phase, k=k)
+    if states0_win:
+        ttb = per_cell_time_to_black(states0_win, black_idx)
+        _save_csv(ttb, outdir/"grid_time_to_black.csv", "time_to_black")
+        _save_heatmap(ttb, outdir/"grid_time_to_black.png",
+                      f"Time to black (win={win}, phase={phase})",
+                      cmap="plasma")
+
+    if sequence:
+        sequence_name = sequence_file or f"{Path(run_dirs[0]).name}_sequence.png"
+        seq_path = outdir / sequence_name
+        seq_steps = sequence_panel(states0, labels,
+                                   colors_path=colors_path,
+                                   steps_spec=sequence_steps,
+                                   save_path=seq_path,
+                                   show=sequence_show)
+        print(f"[gridmaps] sequence panel steps: {seq_steps}")
 
     print("[gridmaps] done.")
 
@@ -244,8 +309,20 @@ def main():
     ap = argparse.ArgumentParser(description="Full-grid (20×20) spatial heatmaps.")
     ap.add_argument("--runs", nargs="+", required=True, help="Run directories (data/run_000 ...)")
     ap.add_argument("--out", default="reports", help="Output directory")
+    ap.add_argument("--win", default="", help="Time window 'start:end' or 'last:N'")
+    ap.add_argument("--phase", type=int, default=-1, help="Phase slice (-1 = all)")
+    ap.add_argument("--k", type=int, default=2, help="Phase period for slicing")
+    ap.add_argument("--sequence", action="store_true", help="Also render a step montage from the first run")
+    ap.add_argument("--sequence-steps", default="", help="Comma list or 'auto[:N]' for montage sampling")
+    ap.add_argument("--sequence-file", default="", help="Filename for the montage PNG")
+    ap.add_argument("--colors", default="label_colors.json", help="Label→color JSON for montage rendering")
+    ap.add_argument("--sequence-show", action="store_true", help="Display the montage interactively")
     args = ap.parse_args()
-    run_gridmaps(args.runs, args.out)
+    run_gridmaps(args.runs, args.out,
+                 win=args.win, phase=args.phase, k=args.k,
+                 sequence=args.sequence, sequence_steps=args.sequence_steps,
+                 sequence_file=args.sequence_file, colors_path=args.colors,
+                 sequence_show=args.sequence_show)
 
 if __name__ == "__main__":
     main()

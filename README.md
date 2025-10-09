@@ -65,6 +65,9 @@ This can generate:
 * **Totalistic vs positional** — test whether rules depend only on *counts* of neighbors vs their *positions*.
 * **Period scan** — see if the system evolves with a hidden cycle (e.g. 2-step oscillation).
 * **Classifier training** — logistic regression on neighborhood + features, used to simulate forward.
+* **Shape diagnostics** — optional flags such as `--do-ring`, `--do-cycle`, `--do-torus`, `--autocorr`, and `--near-cycle` add ring-radius tracking, cycle detection, torus experiments, and correlation scans.
+* **Perturb & simulate** — `--perturb ...` and `--simulate ...` pair with `--sim-steps`, `--sim-png`, etc. to stress the inferred classifier and export rollout JSON/PNGs.
+* **Rulebooks** — `--build-rulebook` (with `--rb-k`, `--rb-split`) exports exact phase rulebooks; `--simulate-rulebook ... --rb-steps` replays them with optional PNG snapshots.
 
 All artifacts are saved to `reports/` (JSON, CSV, PNGs).
 
@@ -83,6 +86,48 @@ Generates:
 * Stacked black/white/other trajectories.
 * Regional breakdown (edge vs interior).
 * Change curves and black-front progression.
+
+### 5. Rulebook exploration
+
+Inspect exported rulebooks for symmetry and dependence structure.
+
+```
+bbx rbxplore --rb reports/rulebooks.json --do orient,center,mi,tree --out reports/rbxplore
+```
+
+Produces CSVs covering orientation invariance, center dependence, positional mutual information, and small decision-tree summaries. Configure the tree depth/phase (`--tree-depth`, `--tree-phase`) to control the simplification.
+
+### 6. Spatial grid heatmaps
+
+Quantify per-cell behaviour across long runs.
+
+```
+bbx gridmaps --runs data/run_000 data/run_001 --out reports/gridmaps --win last:200 --k 2
+```
+
+Generates heatmaps/CSVs for change rate, per-label occupation, entropy, conditional entropy, phase flip rate, and time-to-black. Use `--phase` to isolate a particular phase slice and `--win` to focus on time windows.
+Pass `--sequence` to also render a montage of states from the first run (`--sequence-steps` accepts comma values or `auto[:N]`).
+
+### 7. Regionize walls
+
+Derive wall/inside/outside masks for a dominant label over a time window.
+
+```
+bbx regionize --run data/run_000 --window 3500:5000 --label gru --wall-thickness 2 --out reports/regionize
+```
+
+Outputs occupancy maps, wall/inside/outside masks (plus near-wall bands), and per-region summary stats (cell count, entropy, conditional entropy, flip rate, change rate).
+PNG visuals are emitted alongside the CSVs for quick inspection: occupancy heatmap with the wall contour, color-coded region overlay, metric heatmaps, and bar charts comparing region-level summaries.
+
+### Utility
+
+Need the color legend on the command line?
+
+```
+bbx colors --colors label_colors.json
+```
+
+Outputs the label → hex mapping that the plotting scripts share.
 
 ## Why these analyses?
 
@@ -108,6 +153,8 @@ bbx/              # Python package
   process.py      # Encoding, rule learning, summaries
   analyze.py      # Tests, classifier, simulations
   fractions.py    # Fractions reporting and plots
+  rbxplore.py     # Rulebook orientation/MI/tree exploration
+  gridmaps.py     # Spatial heatmaps & per-cell metrics
   viz.py          # Plotting helpers (color maps, sequences)
 
 data/             # Saved runs (step_XXXX.json)
@@ -135,4 +182,3 @@ bbx analyze --runs data/run_000 --radius 1 \
 bbx fractions --runs data/run_000 --out reports
 
 ```
-

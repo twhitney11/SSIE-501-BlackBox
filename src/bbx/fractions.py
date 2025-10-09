@@ -8,6 +8,11 @@ import pandas as pd
 from .viz import load_label_colors
 from .process import load_run_encoded
 
+# Set bg color to gray because "mex" is white and invisible.
+plt.rcParams['axes.facecolor']   = '#cccccc' 
+plt.rcParams['figure.facecolor'] = '#cccccc'
+plt.rcParams['savefig.facecolor'] = '#cccccc'
+
 BLACK, WHITE = "gru", "mex"  # from your legend
 
 # ----------------- core computations -----------------
@@ -153,22 +158,27 @@ def plot_front_over_time(states, labels, out_png: Path, title="Estimated black f
 def plot_stacked_all_labels(df_long, colors, out_png, title="Fractions (stacked, all labels)"):
     """
     Stacked area plot of all labels individually over time.
+    Order bottom→top by final step fraction (largest on bottom).
     """
     piv = df_long.pivot(index="step", columns="label", values="fraction").fillna(0.0)
     xs = piv.index.values
-    labs = piv.columns.tolist()
-    ys = [piv[lab].values for lab in labs]
+
+    # Sort labels by fraction at final step, descending
+    final_fracs = piv.iloc[-1]
+    labs_sorted = final_fracs.sort_values(ascending=False).index.tolist()
+
+    ys = [piv[lab].values for lab in labs_sorted]
 
     plt.figure(figsize=(10,6))
     plt.stackplot(xs, *ys,
-                  labels=labs,
-                  colors=[colors.get(lab, "#cccccc") for lab in labs])
+                  labels=labs_sorted,
+                  colors=[colors.get(lab, "#cccccc") for lab in labs_sorted])
     plt.xlabel("Step")
     plt.ylabel("Fraction of grid")
     plt.title(title)
     plt.legend(loc="center left", bbox_to_anchor=(1,0.5))
     plt.tight_layout()
-    plt.savefig(out_png, dpi=150, bbox_inches="tight")
+    plt.savefig(out_png, dpi=150, bbox_inches="tight", facecolor="#f0f0f0")
     plt.close()
     print(f"[saved] {out_png}")
 

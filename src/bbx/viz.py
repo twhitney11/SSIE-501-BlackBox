@@ -4,6 +4,11 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
 
+# Set bg color to gray because "mex" is white and invisible.
+plt.rcParams['axes.facecolor']   = '#cccccc' 
+plt.rcParams['figure.facecolor'] = '#cccccc'
+plt.rcParams['savefig.facecolor'] = '#cccccc'
+
 def load_label_colors(json_path: str | Path) -> dict:
     return json.loads(Path(json_path).read_text())
 
@@ -20,17 +25,27 @@ def plot_state_colored(state_int, labels, colors_dict, title=None, show_colorbar
     if title: plt.title(title)
     plt.axis("off"); plt.tight_layout(); plt.show()
 
-def plot_sequence(states_int, labels, colors_dict, steps=None, cols=5, figsize=(12,8)):
+def plot_sequence(states_int, labels, colors_dict, steps=None, cols=5, figsize=(12,8),
+                  save_path=None, show=True):
     import numpy as np
     if steps is None:
         N = min(15, len(states_int))
         steps = np.linspace(0, len(states_int)-1, N, dtype=int).tolist()
     rows = -(-len(steps)//cols)  # ceil
     cmap = cmap_for_labels(labels, colors_dict)
-    plt.figure(figsize=figsize)
+    fig = plt.figure(figsize=figsize)
     for k, t in enumerate(steps):
         ax = plt.subplot(rows, cols, k+1)
         ax.imshow(states_int[t], cmap=cmap, interpolation="nearest", vmin=0, vmax=len(labels)-1)
         ax.set_title(f"t={t}", fontsize=9)
         ax.axis("off")
-    plt.tight_layout(); plt.show()
+    plt.tight_layout()
+    if save_path:
+        save_path = Path(save_path)
+        save_path.parent.mkdir(parents=True, exist_ok=True)
+        fig.savefig(save_path, dpi=150)
+        print(f"[saved] {save_path}")
+    if show:
+        plt.show()
+    plt.close(fig)
+    return fig
