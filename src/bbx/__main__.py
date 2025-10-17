@@ -10,6 +10,13 @@ Subcommands:
   colors       - validate/show label_colors.json
   rbxplore     - explore/simplify rulebooks (symmetry, MI, small tree)
   gridmaps     - full 20×20 spatial heatmaps (change rate, entropy, etc.)
+  regionize    - derive wall/inside/outside masks & stats
+  animate      - render animated GIFs of runs/windows
+  gof          - goodness-of-fit diagnostics for local models
+  aggregate    - cross-run mean/CI summaries
+  entropy      - neighborhood & conditional entropy analysis
+  mi           - mutual information & correlation vs distance
+  stationarity - stationarity / cross-run generalization
 """
 
 import argparse
@@ -19,8 +26,6 @@ from . import process as proc
 from . import analyze as an
 from . import fractions as fr
 from .viz import load_label_colors
-
-
 # ---------- helpers ----------
 def _p(p): return Path(p)
 def _add_out(ap): ap.add_argument("--out", default="reports", help="Output folder (default: reports)")
@@ -28,28 +33,38 @@ def _add_out(ap): ap.add_argument("--out", default="reports", help="Output folde
 
 # ---------- subcommand runners ----------
 def cmd_collect(args):
-    # collect.py must expose run_collect(base_url, steps, outdir, run_prefix, sleep_ms, reset, seed)
-    from .collect import run_collect  # lazy import
-    run_collect(
-        base_url=args.base_url,
-        steps=args.steps,
-        outdir=_p(args.out),
-        run_prefix=args.run_prefix,
-        sleep_ms=args.sleep_ms,
-        reset=not args.no_reset,
-        seed=args.seed,
-    )
+    from .collect import run_collect, run_collect_batch  # lazy import
+    outdir = _p(args.out)
+    reset = not args.no_reset
+    if args.runs and args.runs > 1:
+        run_collect_batch(
+            base_url=args.base_url,
+            steps=args.steps,
+            outdir=outdir,
+            runs=args.runs,
+            run_prefix=args.run_prefix,
+            sleep_ms=args.sleep_ms,
+            reset=reset,
+            seed=args.seed,
+        )
+    else:
+        run_collect(
+            base_url=args.base_url,
+            steps=args.steps,
+            outdir=outdir,
+            run_prefix=args.run_prefix,
+            sleep_ms=args.sleep_ms,
+            reset=reset,
+            seed=args.seed,
+        )
 
 
 def cmd_process(args):
     run_dirs = [_p(p) for p in args.runs]
     for rd in run_dirs:
-        enc_states, labels, _ = proc.load_run_encoded(rd)
-        uniq_count, _ = proc.coverage(enc_states, r=args.radius)
-        print(f"=== {rd} ===")
-        print(f"Steps: {len(enc_states)} | Grid size: {enc_states[0].shape}")
-        print(f"Labels: {len(labels)} -> {labels}")
-        print(f"Unique neighborhoods (r={args.radius}): {uniq_count}")
+        proc.summarize_run(rd, radius=args.radius, window=args.window)
+    if len(run_dirs) > 1:
+        proc.summarize_runs(run_dirs, radius=args.radius, window=args.window)
 
 
 def cmd_analyze(args):
@@ -91,16 +106,20 @@ def cmd_analyze(args):
         rb_png=args.rb_png,
         rb_save_every=args.rb_save_every,
         rb_colors=args.rb_colors,
+        window=args.window,
     )
 
 
 def cmd_fractions(args):
     outdir = _p(args.out)
+    region_labels = [lab.strip() for lab in args.region_labels.split(",") if lab.strip()]
     fr.run_fractions_reports(
         run_dirs=args.runs,
         outdir=outdir,
         colors_path=args.colors,
         smooth=args.smooth,
+        region_labels=region_labels,
+        window=args.window,
     )
 
 
@@ -161,6 +180,67 @@ def cmd_regionize(args):
     )
     run_regionize(cfg)
 
+def cmd_animate(args):
+    from .animate import generate_gif
+    if args.fps is not None:
+        if args.fps <= 0:
+            raise ValueError("--fps must be positive")
+        duration_ms = max(1, int(round(1000.0 / args.fps)))
+    else:
+        duration_ms = args.duration if args.duration is not None else 100
+        if duration_ms <= 0:
+            raise ValueError("--duration must be positive")
+    stride = max(1, args.stride)
+    scale = max(1, args.scale)
+    loop = max(0, args.loop)
+    generate_gif(
+        run_dir=Path(args.run),
+        out_path=Path(args.out),
+        window=args.window,
+        stride=stride,
+        scale=scale,
+        duration_ms=duration_ms,
+        loop=loop,
+        colors_path=Path(args.colors),
+    )
+
+
+def cmd_gof(args):
+    from .gof import GOFConfig, run_gof
+
+    perms = [p.strip() for p in (args.permutations or "").split(",") if p.strip()]
+    cfg = GOFConfig(
+        train_run=_p(args.train_run),
+        train_window=args.train_window or None,
+        test_runs=[_p(p) for p in (args.test_runs if args.test_runs else [args.train_run])],
+        test_window=args.test_window or None,
+        radius=args.radius,
+        feature_mode=args.feature_mode,
+        model=args.model,
+        max_samples=args.max_samples if args.max_samples else None,
+        permutations=perms,
+        seed=args.seed,
+        outdir=_p(args.out),
+        knn_k=args.knn_k,
+    )
+    run_gof(cfg)
+
+
+def cmd_aggregate(args):
+    from .aggregate import run_aggregate
+    run_aggregate(args)
+
+def cmd_entropy(args):
+    from .entropy import run_entropy
+    run_entropy(args)
+
+def cmd_mi(args):
+    from .mi import run_mi
+    run_mi(args)
+
+def cmd_stationarity(args):
+    from .stationarity import run_stationarity
+    run_stationarity(args)
 # ---------- main CLI ----------
 def main():
     ap = argparse.ArgumentParser(prog="bbx", description="Black Box CA toolkit")
@@ -174,6 +254,7 @@ def main():
     apc.add_argument("--run-prefix", default="run", help="Subfolder prefix (default: run)")
     apc.add_argument("--sleep-ms", type=int, default=0, help="Delay between steps (ms)")
     apc.add_argument("--seed", type=int, default=None, help="Optional seed value")
+    apc.add_argument("--runs", type=int, default=1, help="Number of independent runs to capture (default: 1)")
     apc.add_argument("--no-reset", action="store_true", help="Skip sending ?reset=1 before capture")
     apc.set_defaults(func=cmd_collect)
 
@@ -181,6 +262,7 @@ def main():
     app = sub.add_parser("process", help="Summarize runs (coverage, labels)")
     app.add_argument("--runs", nargs="+", required=True)
     app.add_argument("--radius", type=int, default=1)
+    app.add_argument("--window", default="", help="time window like 'start:end' or 'last:N'")
     app.set_defaults(func=cmd_process)
 
     # analyze
@@ -220,6 +302,7 @@ def main():
     apa.add_argument("--rb-png", action="store_true")
     apa.add_argument("--rb-save-every", type=int, default=0)
     apa.add_argument("--rb-colors", default="label_colors.json")
+    apa.add_argument("--window", default="", help="time window like 'start:end' or 'last:N'")
 
     _add_out(apa)
     apa.set_defaults(func=cmd_analyze)
@@ -229,6 +312,8 @@ def main():
     apf.add_argument("--runs", nargs="+", required=True)
     apf.add_argument("--colors", default="label_colors.json")
     apf.add_argument("--smooth", type=int, default=9)
+    apf.add_argument("--region-labels", default="gru,mex", help="Comma list of labels for region plot (default: gru,mex)")
+    apf.add_argument("--window", default="", help="Time window 'start:end' or 'last:N' (default full run)")
     _add_out(apf)
     apf.set_defaults(func=cmd_fractions)
 
@@ -271,6 +356,75 @@ def main():
     aprg.add_argument("--wall-thickness", type=int, default=2, help="Wall band thickness in cells (default: 2)")
     aprg.add_argument("--flip-period", type=int, default=2, help="Phase period k for flip-rate calculations (default: 2)")
     aprg.set_defaults(func=cmd_regionize)
+
+    # animate
+    apa = sub.add_parser("animate", help="Render an animated GIF for a run")
+    apa.add_argument("--run", required=True, help="Run directory (e.g., data/run_000)")
+    apa.add_argument("--out", required=True, help="Output GIF path")
+    apa.add_argument("--window", default="", help="Time window 'start:end' or 'last:N' (default full run)")
+    apa.add_argument("--stride", type=int, default=1, help="Use every Nth frame (default 1)")
+    apa.add_argument("--scale", type=int, default=4, help="Pixel up-scale factor (default 4)")
+    timing = apa.add_mutually_exclusive_group()
+    timing.add_argument("--duration", type=int, default=None, help="Frame duration in ms (default 100)")
+    timing.add_argument("--fps", type=float, default=None, help="Frames per second (alternative to --duration)")
+    apa.add_argument("--loop", type=int, default=0, help="GIF loop count (0=infinite)")
+    apa.add_argument("--colors", default="label_colors.json", help="Path to label→color JSON")
+    apa.set_defaults(func=cmd_animate)
+
+    # gof
+    apg = sub.add_parser("gof", help="Evaluate local goodness of fit and locality")
+    apg.add_argument("--train-run", required=True, help="Run used for training the model")
+    apg.add_argument("--train-window", default="", help="Training window 'start:end' or 'last:N'")
+    apg.add_argument("--test-runs", nargs="*", default=None, help="Optional test runs (default: train run)")
+    apg.add_argument("--test-window", default="", help="Test window 'start:end' or 'last:N'")
+    apg.add_argument("--radius", type=int, default=1, help="Neighborhood radius")
+    apg.add_argument("--model", choices=["logistic", "rule", "markov", "knn"], default="logistic")
+    apg.add_argument("--feature-mode", choices=["local", "center", "global"], default="local")
+    apg.add_argument("--max-samples", type=int, default=0, help="Optional subsample limit")
+    apg.add_argument("--permutations", default="", help="Comma list of permutation tests (e.g. random)")
+    apg.add_argument("--seed", type=int, default=None, help="Random seed for subsampling/permutations")
+    apg.add_argument("--knn-k", type=int, default=5, help="k for KNN model (model=knn)")
+    _add_out(apg)
+    apg.set_defaults(func=cmd_gof)
+
+    # aggregate
+    apa = sub.add_parser("aggregate", help="Aggregate metrics across runs/windows")
+    apa.add_argument("--runs", nargs="+", required=True)
+    apa.add_argument("--window", default="", help="Time window 'start:end' or 'last:N'")
+    apa.add_argument("--labels", default="", help="Comma list of focus labels")
+    apa.add_argument("--colors", default="label_colors.json")
+    _add_out(apa)
+    apa.set_defaults(func=cmd_aggregate)
+
+    apa = sub.add_parser("entropy", help="Neighborhood / conditional entropy analysis")
+    apa.add_argument("--runs", nargs="+", required=True)
+    apa.add_argument("--window", default="", help="Time window 'start:end' or 'last:N'")
+    apa.add_argument("--radius", type=int, default=1)
+    apa.add_argument("--regions", default="all,interior,edge,corner", help="Comma list of regions")
+    _add_out(apa)
+    apa.set_defaults(func=cmd_entropy)
+
+    apa = sub.add_parser("mi", help="Pairwise mutual information / correlation analysis")
+    apa.add_argument("--runs", nargs="+", required=True)
+    apa.add_argument("--window", default="", help="Time window 'start:end' or 'last:N'")
+    apa.add_argument("--samples", type=int, default=1000, help="Number of sampled cell pairs")
+    apa.add_argument("--seed", type=int, default=None)
+    _add_out(apa)
+    apa.set_defaults(func=cmd_mi)
+
+    apa = sub.add_parser("stationarity", help="Stationarity / cross-run generalization")
+    apa.add_argument("--train-run", required=True)
+    apa.add_argument("--train-window", default="")
+    apa.add_argument("--test-runs", nargs="*", default=None)
+    apa.add_argument("--test-window", default="")
+    apa.add_argument("--radius", type=int, default=1)
+    apa.add_argument("--feature-mode", choices=["local", "center", "global"], default="local")
+    apa.add_argument("--model", choices=["logistic", "rule"], default="logistic")
+    apa.add_argument("--segments", type=int, default=4)
+    apa.add_argument("--max-samples", type=int, default=0)
+    apa.add_argument("--seed", type=int, default=None)
+    _add_out(apa)
+    apa.set_defaults(func=cmd_stationarity)
 
     args = ap.parse_args()
     args.func(args)

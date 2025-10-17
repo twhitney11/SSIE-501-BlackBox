@@ -7,13 +7,17 @@ import pandas as pd
 
 from .viz import load_label_colors
 from .process import load_run_encoded
+try:
+    from .utils import parse_window
+except ImportError:  # pragma: no cover - script usage
+    from utils import parse_window
 
 # Set bg color to gray because "mex" is white and invisible.
 plt.rcParams['axes.facecolor']   = '#cccccc' 
 plt.rcParams['figure.facecolor'] = '#cccccc'
 plt.rcParams['savefig.facecolor'] = '#cccccc'
 
-BLACK, WHITE = "gru", "mex"  # from your legend
+BLACK, WHITE = "gru", "mex"  # default focus labels
 
 # ----------------- core computations -----------------
 
@@ -126,18 +130,24 @@ def plot_black_white_only(df_long, colors, out_png: Path, title="Black & White f
     plt.legend()
     save_plot(out_png)
 
-def plot_black_white_by_region(df_reg, colors, out_png: Path, title="Black/White by region"):
+def plot_labels_by_region(df_reg, colors, focus_labels, out_png: Path, title="Label fractions by region"):
     reg_order = ["corner", "edge", "interior"]
     plt.figure(figsize=(11, 5))
     for r, region in enumerate(reg_order, start=1):
-        sub = df_reg[(df_reg["region"] == region) & (df_reg["label"].isin([BLACK, WHITE]))]
+        sub = df_reg[(df_reg["region"] == region) & (df_reg["label"].isin(focus_labels))]
         piv = sub.pivot(index="step", columns="label", values="fraction").fillna(0.0)
         ax = plt.subplot(1, 3, r)
-        if BLACK in piv: ax.plot(piv.index, piv[BLACK], color=colors.get(BLACK, "#000"), label=BLACK)
-        if WHITE in piv: ax.plot(piv.index, piv[WHITE], color=colors.get(WHITE, "#fff"), label=WHITE)
-        ax.set_title(region); ax.set_xlabel("Step"); ax.set_ylim(0, 1)
-        if r == 1: ax.set_ylabel("Fraction"); ax.legend()
-    plt.suptitle(title, y=1.02, fontsize=12)
+        for lab in focus_labels:
+            if lab in piv:
+                ax.plot(piv.index, piv[lab], label=lab, color=colors.get(lab, "#808080"))
+        ax.set_title(region)
+        ax.set_xlabel("Step")
+        ax.set_ylim(0, 1)
+        if r == 1:
+            ax.set_ylabel("Fraction")
+            if focus_labels:
+                ax.legend()
+    plt.suptitle(title, y=1.03, fontsize=12)
     save_plot(out_png)
 
 def plot_diff_curve(states, out_png: Path, title="Cells changed per step"):
@@ -184,7 +194,7 @@ def plot_stacked_all_labels(df_long, colors, out_png, title="Fractions (stacked,
 
 # ----------------- batch runner used by the CLI -----------------
 
-def run_fractions_reports(run_dirs, outdir: Path, colors_path="label_colors.json", smooth=9):
+def run_fractions_reports(run_dirs, outdir: Path, colors_path="label_colors.json", smooth=9, region_labels=None, window: str | None = None):
     """
     Generate CSVs and plots for each run directory.
     Called by the CLI subcommand: bbx fractions --runs ...
@@ -195,9 +205,14 @@ def run_fractions_reports(run_dirs, outdir: Path, colors_path="label_colors.json
     for rd in run_dirs:
         rd = Path(rd)
         states, labels, _ = load_run_encoded(rd)
+        start, end = parse_window(window, len(states))
+        slice_states = states[start:end]
+        if not slice_states:
+            print(f"[warn] {rd}: empty window, skipping")
+            continue
 
         # Fractions (raw + smoothed)
-        df = compute_color_fractions_df(states, labels)
+        df = compute_color_fractions_df(slice_states, labels)
         df_sm = smoothed_per_label(df, window=smooth)
 
         # Write CSVs
@@ -222,12 +237,17 @@ def run_fractions_reports(run_dirs, outdir: Path, colors_path="label_colors.json
             out_png=outdir / f"{rd.name}_fractions_bw.png",
             title=f"Black & White (smoothed w={smooth}) — {rd.name}"
         )
-        df_reg = fractions_by_region(states, labels)
-        plot_black_white_by_region(
-            df_reg, colors,
-            out_png=outdir / f"{rd.name}_bw_by_region.png",
-            title=f"Black/White by region — {rd.name}"
-        )
+        df_reg = fractions_by_region(slice_states, labels)
+        focus = region_labels if region_labels else [BLACK, WHITE]
+        focus = [lab for lab in focus if lab in labels]
+        if focus:
+            label_tag = "_".join(focus)
+            out_name = f"{rd.name}_{label_tag}_by_region.png" if focus != [BLACK, WHITE] else f"{rd.name}_bw_by_region.png"
+            plot_labels_by_region(
+                df_reg, colors, focus,
+                out_png=outdir / out_name,
+                title=f"{', '.join(focus)} by region — {rd.name}"
+            )
         plot_diff_curve(
             states,
             out_png=outdir / f"{rd.name}_diff_curve.png",

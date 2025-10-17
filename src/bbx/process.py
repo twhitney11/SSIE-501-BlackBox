@@ -9,6 +9,11 @@ import numpy as np
 from pathlib import Path
 from collections import Counter
 
+try:
+    from .utils import parse_window
+except ImportError:  # pragma: no cover - support running as script
+    from utils import parse_window
+
 # --- Encoding utilities ---
 
 def load_run(run_dir):
@@ -125,36 +130,47 @@ def coverage(states, r=1):
                 seen[k] += 1
     return len(seen), seen
 
-def summarize_run(run_dir, radius=1):
+def summarize_run(run_dir, radius=1, window=None):
     """Load a run, encode it, and print a quick summary."""
     raw_states = load_run(run_dir)
     labels, label_to_idx = build_label_map(raw_states)
     enc_states = encode_states(raw_states, label_to_idx)
 
+    start, end = parse_window(window, len(enc_states)) if enc_states else (0, 0)
+    enc_slice = enc_states[start:end]
+
+    if not enc_slice:
+        print(f"=== Summary for {run_dir} ===")
+        print("[warn] window produced no steps; skipping")
+        return
+
     print(f"=== Summary for {run_dir} ===")
-    print(f"Steps: {len(enc_states)} | Grid size: {enc_states[0].shape}")
+    if window:
+        print(f"Window: {start}:{end} of {len(enc_states)} total steps")
+    print(f"Steps: {len(enc_slice)} | Grid size: {enc_slice[0].shape}")
     print(f"Labels: {len(labels)} -> {labels}")
 
     # Unique neighborhoods seen
-    uniq_count, seen = coverage(enc_states, r=radius)
+    uniq_count, seen = coverage(enc_slice, r=radius)
     print(f"Unique neighborhoods (r={radius}): {uniq_count}")
 
     # Conflicts per step
     total_conf, total_mismatch = 0, 0
-    for t in range(len(enc_states)-1):
-        S, T = enc_states[t], enc_states[t+1]
+    for t in range(len(enc_slice)-1):
+        S, T = enc_slice[t], enc_slice[t+1]
         rule, conf = learn_rule(S, T, r=radius)
         pred = apply_rule(S, rule, r=radius)
         mismatches = diff_count(pred, T)
         if conf or mismatches:
-            print(f"Step {t}->{t+1}: conflicts={conf}, mismatches={mismatches}")
+            step_start = start + t
+            print(f"Step {step_start}->{step_start+1}: conflicts={conf}, mismatches={mismatches}")
         total_conf += conf
         total_mismatch += mismatches
 
     print(f"Total conflicts: {total_conf}, Total mismatches: {total_mismatch}")
     print()
 
-def summarize_runs(run_dirs, radius=1):
+def summarize_runs(run_dirs, radius=1, window=None):
     """Aggregate stats across multiple runs."""
     all_states = []
     label_sets = set()
@@ -164,9 +180,15 @@ def summarize_runs(run_dirs, radius=1):
         labels, label_to_idx = build_label_map(raw_states)
         label_sets.update(labels)
         enc_states = encode_states(raw_states, label_to_idx)
-        all_states.extend(enc_states)
+        if enc_states:
+            start, end = parse_window(window, len(enc_states))
+            slice_states = enc_states[start:end]
+            if slice_states:
+                all_states.extend(slice_states)
 
     print(f"=== Aggregate summary for {len(run_dirs)} runs ===")
+    if window:
+        print(f"Window applied: {window}")
     print(f"Labels total: {len(label_sets)}")
 
     uniq_count, seen = coverage(all_states, r=radius)

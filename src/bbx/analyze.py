@@ -14,6 +14,7 @@ import pandas as pd
 import hashlib
 
 from .process import neigh_key_wrap, apply_rule_wrap
+from .utils import parse_window
 from .best_k import summarise_period_scan
 
 # Set bg color to gray because "mex" is white and invisible.
@@ -55,7 +56,7 @@ def save_csv(rows, path: Path):
 
 # --------------- loading & encoding ---------------
 
-def load_runs_encoded(run_dirs):
+def load_runs_encoded(run_dirs, window: str | None = None):
     """Return (all_states_encoded, labels_global, label_to_idx_global, per_run_states)"""
     per_run_raw = []
     for rd in run_dirs:
@@ -63,7 +64,15 @@ def load_runs_encoded(run_dirs):
         if not raw:
             print(f"[warn] empty run: {rd}")
             continue
-        per_run_raw.append(raw)
+        start, end = parse_window(window, len(raw)) if raw else (0, 0)
+        sliced = raw[start:end]
+        if not sliced:
+            print(f"[warn] window {window} produced no steps for {rd}; skipping")
+            continue
+        per_run_raw.append(sliced)
+
+    if not per_run_raw:
+        raise ValueError("No runs contained data for the requested window")
 
     # Build a global label map across all runs (stable, alphabetical)
     all_raw = [grid for run in per_run_raw for grid in run]
@@ -773,11 +782,15 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
                  do_autocorr=False, do_near_cycle=False, near_cycle_maxlag=64, near_cycle_eps=0.01,
                  perturb_spec="", simulate_spec="", sim_steps=0, sim_save_every=0, sim_png=False, sim_seed_colors="label_colors.json",
                  build_rulebook=False, rb_k=None, rb_split="none", rb_name="rulebooks",
-                 simulate_rulebook_from="", rb_steps=0, rb_fallback="copy", rb_png=False, rb_save_every=0, rb_colors="label_colors.json"):
+                 simulate_rulebook_from="", rb_steps=0, rb_fallback="copy", rb_png=False, rb_save_every=0, rb_colors="label_colors.json",
+                 window: str | None = None):
 
     tests = set((tests or "").split(",")) if tests else set()
-    all_states, labels, label_to_idx, per_run = load_runs_encoded(run_dirs)
+    all_states, labels, label_to_idx, per_run = load_runs_encoded(run_dirs, window=window)
     ensure_dir(outdir)
+
+    if not per_run or not per_run[0]:
+        raise ValueError("No data available after applying window; unable to analyze")
 
     # Coverage (aggregate)
     uniq_count, seen = coverage(all_states, r=radius)
@@ -789,7 +802,8 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
     save_json({"unique_neighborhoods_r": radius,
                "unique_count": uniq_count,
                "global_conflicts": global_conf,
-               "rule_size": len(global_rule)},
+               "rule_size": len(global_rule),
+               "window": window},
               outdir / "summary.json")
 
     # Plots on first run (for a concrete picture)

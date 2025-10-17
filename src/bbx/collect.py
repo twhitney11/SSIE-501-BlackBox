@@ -123,3 +123,40 @@ def run_collect(base_url: str, steps: int, outdir: Path, run_prefix: str = "run"
     }
     (run_dir / "meta.json").write_text(json.dumps(meta, indent=2))
     print(f"[done] {run_dir}")
+    return run_dir
+
+
+def run_collect_batch(base_url: str, steps: int, outdir: Path, runs: int,
+                      run_prefix: str = "run", sleep_ms: int = 0,
+                      reset: bool = True, seed: int | None = None):
+    outdir = Path(outdir); outdir.mkdir(parents=True, exist_ok=True)
+    created = []
+    for i in range(max(1, runs)):
+        seed_i = seed + i if seed is not None else None
+        print(f"[collect] Run {i+1}/{runs}")
+        run_dir = run_collect(
+            base_url=base_url,
+            steps=steps,
+            outdir=outdir,
+            run_prefix=run_prefix,
+            sleep_ms=sleep_ms,
+            reset=reset,
+            seed=seed_i,
+        )
+        created.append({
+            "run_dir": str(run_dir),
+            "seed": seed_i,
+        })
+
+    manifest = {
+        "base_url": base_url,
+        "steps": steps,
+        "runs_requested": runs,
+        "seed_start": seed,
+        "sleep_ms": sleep_ms,
+        "reset": reset,
+        "entries": created,
+    }
+    manifest_path = outdir / f"{run_prefix}_manifest.json"
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    print(f"[collect] wrote manifest → {manifest_path}")

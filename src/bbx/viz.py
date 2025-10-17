@@ -3,6 +3,8 @@ import json
 from pathlib import Path
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+import numpy as np
+from PIL import Image
 
 # Set bg color to gray because "mex" is white and invisible.
 plt.rcParams['axes.facecolor']   = '#cccccc' 
@@ -27,7 +29,6 @@ def plot_state_colored(state_int, labels, colors_dict, title=None, show_colorbar
 
 def plot_sequence(states_int, labels, colors_dict, steps=None, cols=5, figsize=(12,8),
                   save_path=None, show=True):
-    import numpy as np
     if steps is None:
         N = min(15, len(states_int))
         steps = np.linspace(0, len(states_int)-1, N, dtype=int).tolist()
@@ -49,3 +50,25 @@ def plot_sequence(states_int, labels, colors_dict, steps=None, cols=5, figsize=(
         plt.show()
     plt.close(fig)
     return fig
+
+
+def states_to_rgb_frames(states_int, labels, colors_dict, scale=1):
+    cmap = cmap_for_labels(labels, colors_dict)
+    lut = cmap(range(len(labels)))[:, :3]  # RGB floats
+    frames = []
+    for S in states_int:
+        rgb = lut[np.clip(S, 0, len(labels)-1)]
+        if scale > 1:
+            rgb = np.repeat(np.repeat(rgb, scale, axis=0), scale, axis=1)
+        frames.append((rgb * 255).astype(np.uint8))
+    return frames
+
+
+def save_gif(frames, path: Path, duration_ms=100, loop=0):
+    if not frames:
+        raise ValueError("No frames provided for GIF")
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    images = [Image.fromarray(frame) for frame in frames]
+    images[0].save(path, save_all=True, append_images=images[1:], duration=duration_ms, loop=loop)
+    print(f"[saved] {path}")
