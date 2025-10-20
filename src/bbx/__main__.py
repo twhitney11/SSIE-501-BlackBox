@@ -22,10 +22,13 @@ Subcommands:
 import argparse
 from pathlib import Path
 
+import numpy as np
+
 from . import process as proc
 from . import analyze as an
 from . import fractions as fr
 from .viz import load_label_colors
+from .maskgen import generate_masks
 # ---------- helpers ----------
 def _p(p): return Path(p)
 def _add_out(ap): ap.add_argument("--out", default="reports", help="Output folder (default: reports)")
@@ -69,6 +72,29 @@ def cmd_process(args):
 
 def cmd_analyze(args):
     outdir = _p(args.out)
+    scope_mask = None
+    scope_desc = None
+    if args.scope_mask and args.scope_region:
+        raise ValueError("Provide at most one of --scope-mask or --scope-region.")
+    if args.scope_mask:
+        if ":" in args.scope_mask:
+            mask_path_str, column = args.scope_mask.split(":", 1)
+        else:
+            mask_path_str, column = args.scope_mask, None
+        mask_path = Path(mask_path_str)
+        scope_mask = an.load_scope_mask_csv(mask_path, column=column)
+        scope_desc = f"mask:{mask_path.name}" + (f":{column}" if column else "")
+    elif args.scope_region:
+        if ":" not in args.scope_region:
+            raise ValueError("--scope-region must be provided as 'path:region_name'.")
+        mask_path_str, region_name = args.scope_region.rsplit(":", 1)
+        mask_path = Path(mask_path_str)
+        scope_mask = an.load_scope_region_mask(mask_path, region_name)
+        scope_desc = f"region:{region_name}:{mask_path.name}"
+    if scope_mask is not None and args.scope_invert:
+        scope_mask = np.logical_not(scope_mask)
+        scope_desc = (scope_desc or "mask") + " (inverted)"
+
     an.run_analysis(
         run_dirs=args.runs,
         outdir=outdir,
@@ -107,7 +133,16 @@ def cmd_analyze(args):
         rb_save_every=args.rb_save_every,
         rb_colors=args.rb_colors,
         window=args.window,
+        scope_mask=scope_mask,
+        scope_desc=scope_desc,
     )
+
+
+def cmd_masks(args):
+    config_path = _p(args.config)
+    outdir = _p(args.out)
+    run = args.run if args.run else None
+    generate_masks(config_path, outdir, run=run, window=args.window, allow_overlap=args.allow_overlap)
 
 
 def cmd_fractions(args):
@@ -303,9 +338,22 @@ def main():
     apa.add_argument("--rb-save-every", type=int, default=0)
     apa.add_argument("--rb-colors", default="label_colors.json")
     apa.add_argument("--window", default="", help="time window like 'start:end' or 'last:N'")
+    apa.add_argument("--scope-mask", default="", help="Mask CSV to restrict analysis cells (path[:column])")
+    apa.add_argument("--scope-region", default="", help="Region labels CSV and name (path:region_name)")
+    apa.add_argument("--scope-invert", action="store_true", help="Invert the loaded scope mask")
 
     _add_out(apa)
     apa.set_defaults(func=cmd_analyze)
+
+    # masks
+    apm = sub.add_parser("masks", help="Generate manual region masks from config")
+    apm.add_argument("--config", required=True, help="Path to mask config JSON")
+    apm.add_argument("--out", default="reports/masks", help="Output directory (default: reports/masks)")
+    apm.add_argument("--run", default="", help="Optional run directory to infer grid size")
+    apm.add_argument("--window", default="", help="Window 'start:end' or 'last:N' when inferring from run")
+    apm.add_argument("--allow-overlap", dest="allow_overlap", action="store_true", help="Allow overlapping regions (first region wins where overlap)")
+    apm.add_argument("--no-allow-overlap", dest="allow_overlap", action="store_false", help="Disallow overlapping regions (default uses config setting)")
+    apm.set_defaults(func=cmd_masks, allow_overlap=None)
 
     # fractions
     apf = sub.add_parser("fractions", help="Fractions + region + diff/front plots")

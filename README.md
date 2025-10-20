@@ -71,6 +71,7 @@ This can generate:
 * **Shape diagnostics** — optional flags such as `--do-ring`, `--do-cycle`, `--do-torus`, `--autocorr`, and `--near-cycle` add ring-radius tracking, cycle detection, torus experiments, and correlation scans. Tune near-cycle behaviour with `--near-cycle-maxlag` and `--near-cycle-eps`.
 * **Perturb & simulate** — `--perturb ...` and `--simulate ...` pair with `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, etc. to stress the inferred classifier and export rollout JSON/PNGs.
 * **Rulebooks** — `--build-rulebook` (with `--rb-k`, `--rb-split`, `--rb-name`) exports exact phase rulebooks; `--simulate-rulebook ... --rb-steps` replays them with optional PNG snapshots via `--rb-png`, `--rb-save-every`, `--rb-colors`, and fallback control through `--rb-fallback`.
+* **Scoped analysis** — limit calculations to a mask with `--scope-mask path:is_region` (CSV of 0/1) or a region-label file via `--scope-region path:region`. Add `--scope-invert` to flip the mask. This pairs well with `bbx regionize` or manual masks (see below).
 
 All artifacts are saved to `reports/` (JSON, CSV, PNGs).
 
@@ -206,7 +207,7 @@ Below is a quick reference of the available subcommands and their key flags.
 |---------|-------------|-------------|
 | `collect` | Capture one or many runs from the PHP interface. | `--base-url`, `--steps`, `--runs`, `--out`, `--run-prefix`, `--seed`, `--sleep-ms`, `--no-reset` |
 | `process` | Print coverage/conflict summaries. | `--runs`, `--radius`, `--window` |
-| `analyze` | Core analysis suite (rule learning, diagnostics, simulation). | `--runs`, `--radius`, `--window`, `--tests`, `--period-scan`, `--train-clf`, `--do-*`, `--near-cycle`, `--near-cycle-maxlag`, `--near-cycle-eps`, `--perturb`, `--simulate`, `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, `--build-rulebook`, `--rb-k`, `--rb-split`, `--rb-name`, `--rb-fallback`, `--rb-steps`, `--rb-png`, `--rb-save-every`, `--rb-colors` |
+| `analyze` | Core analysis suite (rule learning, diagnostics, simulation). | `--runs`, `--radius`, `--window`, `--tests`, `--period-scan`, `--train-clf`, `--do-*`, `--near-cycle`, `--near-cycle-maxlag`, `--near-cycle-eps`, `--perturb`, `--simulate`, `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, `--build-rulebook`, `--rb-k`, `--rb-split`, `--rb-name`, `--rb-fallback`, `--rb-steps`, `--rb-png`, `--rb-save-every`, `--rb-colors`, `--scope-mask`, `--scope-region`, `--scope-invert` |
 | `fractions` | Fractions, regional breakdowns, change curves. | `--runs`, `--out`, `--colors`, `--smooth`, `--region-labels`, `--window` |
 | `gof` | Goodness-of-fit / locality testing. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode {local,center,global}`, `--model {logistic,rule,markov,knn}`, `--knn-k`, `--max-samples`, `--permutations`, `--seed`, `--out` |
 | `rbxplore` | Rulebook symmetry/MI/tree exploration. | `--rb`, `--do`, `--tree-phase`, `--tree-region`, `--tree-depth`, `--out` |
@@ -218,6 +219,7 @@ Below is a quick reference of the available subcommands and their key flags.
 | `mi` | Pairwise mutual information & correlation vs distance. | `--runs`, `--window`, `--samples`, `--seed`, `--out` |
 | `stationarity` | Stationarity / cross-run generalization. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode`, `--model`, `--segments`, `--max-samples`, `--seed`, `--out` |
 | `colors` | Print label→color mapping. | `--colors` |
+| `masks` | Build manual region masks from a JSON config. | `--config`, `--out`, `--run`, `--window`, `--allow-overlap` |
 
 ## Why these analyses?
 
@@ -243,6 +245,7 @@ bbx/              # Python package
   process.py      # Encoding, rule learning, summaries
   analyze.py      # Tests, classifier, simulations
   fractions.py    # Fractions reporting and plots
+  maskgen.py      # Manual region mask generator
   rbxplore.py     # Rulebook orientation/MI/tree exploration
   gridmaps.py     # Spatial heatmaps & per-cell metrics
   viz.py          # Plotting helpers (color maps, sequences)
@@ -251,6 +254,55 @@ data/             # Saved runs (step_XXXX.json)
 reports/          # Generated CSVs, JSONs, PNGs
 label_colors.json # Mapping from labels → colors
 ```
+
+## Manual regions
+
+Use `bbx masks` to define arbitrary regions without re-running `regionize`. Supply a JSON config describing the grid and the shapes that compose each region, then consume the CSV masks with `--scope-mask`/`--scope-region` when running `bbx analyze`.
+
+Example config (`manual_regions.json`):
+
+```json
+{
+  "grid": { "height": 20, "width": 20 },
+  "regions": [
+    {
+      "name": "interior",
+      "include": [
+        { "type": "rect", "top": 4, "left": 3, "height": 12, "width": 14 }
+      ]
+    },
+    {
+      "name": "wall",
+      "include": [
+        { "type": "rect", "top": 2, "left": 2, "height": 16, "width": 18 }
+      ],
+      "exclude": [
+        { "type": "rect", "top": 3, "left": 3, "height": 14, "width": 16 }
+      ]
+    }
+  ]
+}
+```
+
+Generate masks:
+
+```
+bbx masks --config manual_regions.json --out reports/manual_masks
+```
+
+This writes `manual_regions_interior.csv`, `manual_regions_wall.csv`, and a `manual_regions_region_labels.csv` file. Analyze a region by referencing the mask:
+
+```
+bbx analyze --runs data/run_000 --radius 2 \
+  --scope-mask reports/manual_masks/manual_regions_wall.csv:is_wall \
+  --out reports/an_wall
+```
+
+Notes:
+
+- Omit `grid` if you prefer to infer the shape from a run: `bbx masks --config manual_regions.json --run data/run_000 --window last:2000` will read the lattice size from the specified run/window.
+- Supported shapes include `rect` (`top`, `left`, `height`, `width`), `disk`/`circle` (`center_i`, `center_j`, `radius`), and explicit `points` (`[[i, j], ...]`). Combine multiple shapes in `include`, remove areas with `exclude`, or reuse previously declared regions with `inherit`, `include_regions`, and `exclude_regions`.
+- Region overlaps are rejected unless you opt-in. Set `"allow_overlap": true` in the config or pass `--allow-overlap` when running `bbx masks`.
 
 ## Example: Full cycle
 

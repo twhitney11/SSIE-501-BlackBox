@@ -26,7 +26,8 @@ plt.rcParams['savefig.facecolor'] = '#cccccc'
 # ---- import local helpers from process.py ----
 from .process import (
     load_run, build_label_map, encode_states,
-    learn_rule, apply_rule, diff_count, neigh_key, coverage
+    learn_rule, apply_rule, diff_count, neigh_key,
+    learn_rule_scoped, count_conflicts_over_series
 )
 
 # Setting some constants for black and white classes
@@ -53,6 +54,57 @@ def save_csv(rows, path: Path):
             line.append(s)
         lines.append(",".join(line))
     path.write_text("\n".join(lines))
+
+
+def _to_bool(val) -> bool:
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return False
+    if isinstance(val, (bool, np.bool_)):
+        return bool(val)
+    if isinstance(val, (int, np.integer)):
+        return bool(val)
+    if isinstance(val, (float, np.floating)):
+        return bool(int(val))
+    s = str(val).strip().lower()
+    if s in {"1", "true", "t", "yes", "y"}:
+        return True
+    if s in {"0", "false", "f", "no", "n", ""}:
+        return False
+    return True
+
+
+def load_scope_mask_csv(path: Path, column: str | None = None) -> np.ndarray:
+    df = pd.read_csv(path)
+    if "i" not in df.columns or "j" not in df.columns:
+        raise ValueError(f"Scope mask file {path} must contain 'i' and 'j' columns.")
+    if column is None:
+        candidates = [c for c in df.columns if c not in {"i", "j"}]
+        if not candidates:
+            raise ValueError(f"Scope mask file {path} needs a boolean column besides 'i','j'.")
+        column = candidates[0]
+    if column not in df.columns:
+        raise ValueError(f"Column '{column}' not found in {path}.")
+    rows = df[["i", "j", column]].to_numpy()
+    H = int(df["i"].max()) + 1
+    W = int(df["j"].max()) + 1
+    mask = np.zeros((H, W), dtype=bool)
+    for i, j, v in rows:
+        mask[int(i), int(j)] = _to_bool(v)
+    return mask
+
+
+def load_scope_region_mask(path: Path, region: str) -> np.ndarray:
+    df = pd.read_csv(path)
+    if {"i", "j", "region"} - set(df.columns):
+        raise ValueError(f"Region labels file {path} must include 'i','j','region'.")
+    rows = df[["i", "j", "region"]].to_numpy()
+    H = int(df["i"].max()) + 1
+    W = int(df["j"].max()) + 1
+    mask = np.zeros((H, W), dtype=bool)
+    region = region.strip()
+    for i, j, reg in rows:
+        mask[int(i), int(j)] = str(reg).strip() == region
+    return mask
 
 # --------------- loading & encoding ---------------
 
@@ -87,7 +139,7 @@ def load_runs_encoded(run_dirs, window: str | None = None):
     all_states = [arr for run in per_run_enc for arr in run]
     return all_states, labels, label_to_idx, per_run_enc
 
-def period_scan(per_run_states, r=1, max_k=32, split="none"):
+def period_scan(per_run_states, r=1, max_k=32, split="none", scope_mask: np.ndarray | None = None):
     """
     Scan time period k (2..max_k) and optionally split by region.
     split ∈ {"none","edge","corner_edge"}.
@@ -135,6 +187,8 @@ def period_scan(per_run_states, r=1, max_k=32, split="none"):
                     S, T = states[t], states[t + 1]
                     for i in range(H):
                         for j in range(W):
+                            if scope_mask is not None and not scope_mask[i, j]:
+                                continue
                             if scope and not scope(i, j):
                                 continue
                             key = neigh_key(S, i, j, r=r)
@@ -149,12 +203,14 @@ def period_scan(per_run_states, r=1, max_k=32, split="none"):
 
 # --------------- coverage & conflicts ---------------
 
-def neighborhood_counts(states, r=1, oob_val=-1):
+def neighborhood_counts(states, r=1, oob_val=-1, scope_mask: np.ndarray | None = None):
     seen = Counter()
     for S in states:
         H, W = S.shape
         for i in range(H):
             for j in range(W):
+                if scope_mask is not None and not scope_mask[i, j]:
+                    continue
                 vals = []
                 for di in range(-r, r+1):
                     for dj in range(-r, r+1):
@@ -166,24 +222,18 @@ def neighborhood_counts(states, r=1, oob_val=-1):
                 seen[",".join(map(str, vals))] += 1
     return seen
 
-def aggregate_conflicts(states, r=1):
+def aggregate_conflicts(states, r=1, scope_mask: np.ndarray | None = None):
     """Merge transitions across all consecutive pairs; count conflicts and build a global rulebook."""
-    rule = {}
-    conflicts = 0
-    for t in range(len(states) - 1):
-        S, T = states[t], states[t + 1]
-        H, W = S.shape
-        for i in range(H):
-            for j in range(W):
-                k = neigh_key(S, i, j, r=r)
-                y = int(T[i, j])
-                if k in rule and rule[k] != y:
-                    conflicts += 1
-                else:
-                    rule[k] = y
-    return rule, conflicts
+    scope = (lambda i, j: scope_mask[i, j]) if scope_mask is not None else None
+    return count_conflicts_over_series(states, r=r, scope=scope)
 
-def extract_conflict_examples(states, labels, r=1, max_examples=50):
+
+def masked_diff_count(A: np.ndarray, B: np.ndarray, mask: np.ndarray | None = None) -> int:
+    if mask is None:
+        return diff_count(A, B)
+    return int((A != B)[mask].sum())
+
+def extract_conflict_examples(states, labels, r=1, max_examples=50, scope_mask: np.ndarray | None = None):
     """Return list of dicts with neighborhood (as label grid) and outputs observed."""
     H, W = states[0].shape
     seen = {}
@@ -192,6 +242,8 @@ def extract_conflict_examples(states, labels, r=1, max_examples=50):
         S, T = states[t], states[t + 1]
         for i in range(H):
             for j in range(W):
+                if scope_mask is not None and not scope_mask[i, j]:
+                    continue
                 # build key with OOB so edges are distinct
                 vals = []
                 for di in range(-r, r+1):
@@ -236,25 +288,32 @@ def extract_conflict_examples(states, labels, r=1, max_examples=50):
 
 # --------------- permutation invariance ---------------
 
-def permutation_invariance_test(states, labels, trials=20, r=1, seed=42):
+def permutation_invariance_test(states, labels, trials=20, r=1, seed=42, scope_mask: np.ndarray | None = None):
     """Shuffle label ids and see if step-accuracy for 0->1 changes; repeat across early steps."""
     rng = random.Random(seed)
     L = len(labels)
     results = []
     steps_to_test = list(range(0, min(10, len(states) - 1)))  # first 10 transitions
+    scope = (lambda i, j: scope_mask[i, j]) if scope_mask is not None else None
     for t in steps_to_test:
         S, T = states[t], states[t+1]
-        base_rule, _ = learn_rule(S, T, r=r)
+        if scope:
+            base_rule, _ = learn_rule_scoped(S, T, r=r, scope=scope)
+        else:
+            base_rule, _ = learn_rule(S, T, r=r)
         base_pred = apply_rule(S, base_rule, r=r)
-        base_mis = diff_count(base_pred, T)
+        base_mis = masked_diff_count(base_pred, T, scope_mask)
         worse = same = better = 0
         for _ in range(trials):
             perm = list(range(L)); rng.shuffle(perm)
             Sperm = np.vectorize(lambda x: perm[x])(S)
             Tperm = np.vectorize(lambda x: perm[x])(T)
-            rb, _ = learn_rule(Sperm, Tperm, r=r)
+            if scope:
+                rb, _ = learn_rule_scoped(Sperm, Tperm, r=r, scope=scope)
+            else:
+                rb, _ = learn_rule(Sperm, Tperm, r=r)
             pred = apply_rule(Sperm, rb, r=r)
-            mis = diff_count(pred, Tperm)
+            mis = masked_diff_count(pred, Tperm, scope_mask)
             if mis > base_mis: worse += 1
             elif mis < base_mis: better += 1
             else: same += 1
@@ -273,12 +332,14 @@ def totalistic_key(vals):
     # stable by label id; include OOB (-1)
     return "|".join(f"{k}:{cnt[k]}" for k in sorted(cnt.keys()))
 
-def learn_totalistic(S, T, r=1, oob=-1):
+def learn_totalistic(S, T, r=1, oob=-1, scope_mask: np.ndarray | None = None):
     H, W = S.shape
     rule = {}
     conflicts = 0
     for i in range(H):
         for j in range(W):
+            if scope_mask is not None and not scope_mask[i, j]:
+                continue
             vals = []
             for di in range(-r, r+1):
                 for dj in range(-r, r+1):
@@ -306,35 +367,43 @@ def apply_totalistic(S, rule, r=1, oob=-1):
             T[i, j] = rule.get(k, S[i, j])
     return T
 
-def compare_totalistic_vs_positional(states, r=1):
+def compare_totalistic_vs_positional(states, r=1, scope_mask: np.ndarray | None = None):
     """Return table of mismatches over first K transitions for both models."""
     K = min(20, len(states) - 1)
     rows = [["step", "total_cells", "mismatch_positional", "mismatch_totalistic"]]
+    scope = (lambda i, j: scope_mask[i, j]) if scope_mask is not None else None
     for t in range(K):
         S, T = states[t], states[t+1]
-        rb_pos, _ = learn_rule(S, T, r=r)
+        if scope:
+            rb_pos, _ = learn_rule_scoped(S, T, r=r, scope=scope)
+        else:
+            rb_pos, _ = learn_rule(S, T, r=r)
         pred_pos = apply_rule(S, rb_pos, r=r)
-        mis_pos = diff_count(pred_pos, T)
+        mis_pos = masked_diff_count(pred_pos, T, scope_mask)
 
-        rb_tot, _ = learn_totalistic(S, T, r=r)
+        rb_tot, _ = learn_totalistic(S, T, r=r, scope_mask=scope_mask)
         pred_tot = apply_totalistic(S, rb_tot, r=r)
-        mis_tot = diff_count(pred_tot, T)
+        mis_tot = masked_diff_count(pred_tot, T, scope_mask)
 
         rows.append([f"{t}->{t+1}", S.size, mis_pos, mis_tot])
     return rows
 
 # --------------- plotting ---------------
 
-def plot_mismatch_curve(states, r=1, outdir: Path = None, prefix=""):
+def plot_mismatch_curve(states, r=1, outdir: Path = None, prefix="", scope_mask: np.ndarray | None = None):
     """Train on step t->t+1 and report exact replay mismatch for each of first K transitions."""
     K = min(100, len(states) - 1)
     xs = []
     ms = []
+    scope = (lambda i, j: scope_mask[i, j]) if scope_mask is not None else None
     for t in range(K):
         S, T = states[t], states[t+1]
-        rb, _ = learn_rule(S, T, r=r)
+        if scope:
+            rb, _ = learn_rule_scoped(S, T, r=r, scope=scope)
+        else:
+            rb, _ = learn_rule(S, T, r=r)
         pred = apply_rule(S, rb, r=r)
-        ms.append(diff_count(pred, T))
+        ms.append(masked_diff_count(pred, T, scope_mask))
         xs.append(t)
     plt.figure()
     plt.plot(xs, ms, marker='.')
@@ -783,7 +852,7 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
                  perturb_spec="", simulate_spec="", sim_steps=0, sim_save_every=0, sim_png=False, sim_seed_colors="label_colors.json",
                  build_rulebook=False, rb_k=None, rb_split="none", rb_name="rulebooks",
                  simulate_rulebook_from="", rb_steps=0, rb_fallback="copy", rb_png=False, rb_save_every=0, rb_colors="label_colors.json",
-                 window: str | None = None):
+                 window: str | None = None, scope_mask: np.ndarray | None = None, scope_desc: str | None = None):
 
     tests = set((tests or "").split(",")) if tests else set()
     all_states, labels, label_to_idx, per_run = load_runs_encoded(run_dirs, window=window)
@@ -792,25 +861,50 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
     if not per_run or not per_run[0]:
         raise ValueError("No data available after applying window; unable to analyze")
 
+    if scope_mask is not None:
+        scope_mask = scope_mask.astype(bool)
+        mask_shape = scope_mask.shape
+        for run in per_run:
+            if not run:
+                continue
+            if run[0].shape != mask_shape:
+                raise ValueError(f"Scope mask shape {mask_shape} does not match run grid shape {run[0].shape}.")
+        active = int(scope_mask.sum())
+        total = int(scope_mask.size)
+        if active == 0:
+            raise ValueError("Scope mask selects zero cells; nothing to analyze.")
+        pct = (active / total) * 100.0
+        desc = scope_desc or "custom mask"
+        print(f"[scope] applying mask '{desc}' -> {active}/{total} cells ({pct:.2f}%)")
+
     # Coverage (aggregate)
-    uniq_count, seen = coverage(all_states, r=radius)
+    seen = neighborhood_counts(all_states, r=radius, scope_mask=scope_mask)
+    uniq_count = len(seen)
     print(f"[aggregate] unique neighborhoods (r={radius}): {uniq_count}")
 
     # Global conflicts (aggregate)
-    global_rule, global_conf = aggregate_conflicts(all_states, r=radius)
+    global_rule, global_conf = aggregate_conflicts(all_states, r=radius, scope_mask=scope_mask)
     print(f"[aggregate] global conflicts: {global_conf}, rule size: {len(global_rule)}")
-    save_json({"unique_neighborhoods_r": radius,
-               "unique_count": uniq_count,
-               "global_conflicts": global_conf,
-               "rule_size": len(global_rule),
-               "window": window},
-              outdir / "summary.json")
+    summary_payload = {
+        "unique_neighborhoods_r": radius,
+        "unique_count": uniq_count,
+        "global_conflicts": global_conf,
+        "rule_size": len(global_rule),
+        "window": window,
+    }
+    if scope_mask is not None:
+        summary_payload["scope"] = {
+            "description": scope_desc or "",
+            "active_cells": int(scope_mask.sum()),
+            "total_cells": int(scope_mask.size),
+        }
+    save_json(summary_payload, outdir / "summary.json")
 
     # Plots on first run (for a concrete picture)
     if per_run:
         from .viz import load_label_colors, plot_sequence
         colors = load_label_colors("label_colors.json")
-        plot_mismatch_curve(per_run[0], r=radius, outdir=outdir, prefix="")
+        plot_mismatch_curve(per_run[0], r=radius, outdir=outdir, prefix="", scope_mask=scope_mask)
         plot_label_histogram(per_run[0], labels, colors, outdir=outdir, prefix="")
 
     # Consistency across runs
@@ -823,7 +917,7 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
 
     # Conflict inspection & export
     if "conflicts" in tests or not tests:
-        examples = extract_conflict_examples(all_states, labels, r=radius, max_examples=100)
+        examples = extract_conflict_examples(all_states, labels, r=radius, max_examples=100, scope_mask=scope_mask)
         save_json({"count": len(examples), "examples": examples}, outdir / "conflicts_examples.json")
         # also CSV (first neighborhood flattened)
         rows = [["t","i","j","radius","outputs","neighborhood_flat"]]
@@ -836,7 +930,7 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
 
     # Permutation invariance test
     if "permutation" in tests or not tests:
-        perm_res = permutation_invariance_test(all_states, labels, trials=20, r=radius)
+        perm_res = permutation_invariance_test(all_states, labels, trials=20, r=radius, scope_mask=scope_mask)
         save_json({"results": perm_res}, outdir / "permutation_test.json")
         rows = [["step","baseline_mismatches","trials","worse","same","better"]]
         for rrow in perm_res:
@@ -846,18 +940,33 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
 
     # Totalistic vs positional
     if "totalistic" in tests or not tests:
-        cmp_rows = compare_totalistic_vs_positional(all_states, r=radius)
+        cmp_rows = compare_totalistic_vs_positional(all_states, r=radius, scope_mask=scope_mask)
         save_csv(cmp_rows, outdir / "totalistic_vs_positional.csv")
         print(f"[saved] {outdir/'totalistic_vs_positional.csv'}")
 
     if period_scan_mode:
-        modes = [m.strip() for m in period_scan_mode.split(",") if m.strip()]
-        for mode in modes:
-            rows = period_scan(per_run, r=radius, max_k=32, split=mode)
-            save_csv(rows, outdir / f"period_scan_{mode}.csv")
-            print(f"[saved] {outdir/f'period_scan_{mode}.csv'}")
+        raw_modes = [m.strip() for m in period_scan_mode.split(",") if m.strip()]
+        scan_specs: list[tuple[str, str, int]] = []
+        for raw in raw_modes:
+            split_name = raw or "none"
+            max_k_local = 32
+            if ":" in raw:
+                split_part, max_part = raw.split(":", 1)
+                split_name = split_part or "none"
+                try:
+                    max_k_local = int(max_part)
+                except ValueError:
+                    print(f"[warn] Invalid period-scan max_k '{max_part}' for '{raw}'; using 32")
+                    max_k_local = 32
+            scan_specs.append((raw, split_name, max_k_local))
+
+        for raw_mode, split_name, max_k_local in scan_specs:
+            rows = period_scan(per_run, r=radius, max_k=max_k_local, split=split_name, scope_mask=scope_mask)
+            out_path = outdir / f"period_scan_{raw_mode}.csv"
+            save_csv(rows, out_path)
+            print(f"[saved] {out_path}")
         try:
-            summarise_period_scan(outdir, modes)
+            summarise_period_scan(outdir, [spec[0] for spec in scan_specs])
         except Exception as e:
             print(f"[warn] period scan summary failed: {e}")
 
