@@ -212,7 +212,7 @@ Below is a quick reference of the available subcommands and their key flags.
 | `gof` | Goodness-of-fit / locality testing. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode {local,center,global}`, `--model {logistic,rule,markov,knn}`, `--knn-k`, `--max-samples`, `--permutations`, `--seed`, `--out` |
 | `rbxplore` | Rulebook symmetry/MI/tree exploration. | `--rb`, `--do`, `--tree-phase`, `--tree-region`, `--tree-depth`, `--out` |
 | `gridmaps` | Per-cell heatmaps and CSVs. | `--runs`, `--out`, `--win`, `--phase`, `--k`, `--sequence`, `--sequence-steps`, `--sequence-file`, `--colors`, `--sequence-show` |
-| `regionize` | Derive wall/inside/outside masks and stats. | `--run`, `--out`, `--window`, `--label`, `--threshold`, `--wall-thickness`, `--flip-period` |
+| `regionize` | Derive wall/inside/outside masks and stats. | `--run`, `--out`, `--window`, `--label`, `--threshold`, `--wall-thickness`, `--flip-period`, `--mask-config` |
 | `animate` | Render animated GIFs. | `--run`, `--out`, `--window`, `--stride`, `--scale`, `--duration`, `--fps`, `--loop`, `--colors` |
 | `aggregate` | Aggregate fractions/change metrics across runs. | `--runs`, `--window`, `--labels`, `--colors`, `--out` |
 | `entropy` | Neighborhood & conditional entropy per region. | `--runs`, `--window`, `--radius`, `--regions`, `--out` |
@@ -220,6 +220,7 @@ Below is a quick reference of the available subcommands and their key flags.
 | `stationarity` | Stationarity / cross-run generalization. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode`, `--model`, `--segments`, `--max-samples`, `--seed`, `--out` |
 | `colors` | Print label→color mapping. | `--colors` |
 | `masks` | Build manual region masks from a JSON config. | `--config`, `--out`, `--run`, `--window`, `--allow-overlap` |
+| `metrics` | Conditional entropy & mutual information per region. | `--runs`, `--config`, `--window`, `--top-mi`, `--mi-lag`, `--out` |
 
 ## Why these analyses?
 
@@ -303,6 +304,7 @@ Notes:
 - Omit `grid` if you prefer to infer the shape from a run: `bbx masks --config manual_regions.json --run data/run_000 --window last:2000` will read the lattice size from the specified run/window.
 - Supported shapes include `rect` (`top`, `left`, `height`, `width`), `disk`/`circle` (`center_i`, `center_j`, `radius`), and explicit `points` (`[[i, j], ...]`). Combine multiple shapes in `include`, remove areas with `exclude`, or reuse previously declared regions with `inherit`, `include_regions`, and `exclude_regions`.
 - Region overlaps are rejected unless you opt-in. Set `"allow_overlap": true` in the config or pass `--allow-overlap` when running `bbx masks`.
+- Quantify dynamics inside each mask with `bbx metrics --runs data/run_000 data/run_001 --config config/masks.json --window last:2000 --out reports/metrics`. The command saves `region_metrics_summary.csv`, per-region `*_top_mi_pairs.csv`, and companion plots (`stable_cells.png`, `stable_cells_regions.png`, `self_transition_fraction.png`, `cond_entropy*.png`, `transitions_vs_changes.png`, `<region>_top_mi_pairs.png`, `region_mi_heatmap.png`, `<region>_transition_heatmap.png`) so you can inspect stability, inter-region coupling, and label transitions at a glance.
 
 ## Example: Full cycle
 

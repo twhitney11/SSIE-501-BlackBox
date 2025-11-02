@@ -29,6 +29,7 @@ from . import analyze as an
 from . import fractions as fr
 from .viz import load_label_colors
 from .maskgen import generate_masks
+from .metrics import compute_region_metrics
 # ---------- helpers ----------
 def _p(p): return Path(p)
 def _add_out(ap): ap.add_argument("--out", default="reports", help="Output folder (default: reports)")
@@ -145,6 +146,18 @@ def cmd_masks(args):
     generate_masks(config_path, outdir, run=run, window=args.window, allow_overlap=args.allow_overlap)
 
 
+def cmd_metrics(args):
+    outdir = _p(args.out)
+    compute_region_metrics(
+        run_dirs=args.runs,
+        config_path=_p(args.config),
+        outdir=outdir,
+        window=args.window,
+        top_mi_pairs=args.top_mi,
+        mi_lag=args.mi_lag,
+    )
+
+
 def cmd_fractions(args):
     outdir = _p(args.out)
     region_labels = [lab.strip() for lab in args.region_labels.split(",") if lab.strip()]
@@ -212,6 +225,7 @@ def cmd_regionize(args):
         threshold=args.threshold,
         wall_thickness=args.wall_thickness,
         flip_period=args.flip_period,
+        mask_config=Path(args.mask_config) if args.mask_config else None,
     )
     run_regionize(cfg)
 
@@ -355,6 +369,16 @@ def main():
     apm.add_argument("--no-allow-overlap", dest="allow_overlap", action="store_false", help="Disallow overlapping regions (default uses config setting)")
     apm.set_defaults(func=cmd_masks, allow_overlap=None)
 
+    # metrics
+    apmet = sub.add_parser("metrics", help="Compute region metrics (conditional entropy, mutual information) from runs and mask config")
+    apmet.add_argument("--runs", nargs="+", required=True)
+    apmet.add_argument("--config", default="config/masks.json", help="Path to mask config JSON (default: config/masks.json)")
+    apmet.add_argument("--window", default="", help="Time window 'start:end' or 'last:N'")
+    apmet.add_argument("--top-mi", type=int, default=20, help="Number of top MI cell pairs to record per region")
+    apmet.add_argument("--mi-lag", type=int, default=0, help="Lag (in steps) for MI; 0 = synchronous")
+    apmet.add_argument("--out", default="reports/metrics", help="Output directory (default: reports/metrics)")
+    apmet.set_defaults(func=cmd_metrics)
+
     # fractions
     apf = sub.add_parser("fractions", help="Fractions + region + diff/front plots")
     apf.add_argument("--runs", nargs="+", required=True)
@@ -403,6 +427,7 @@ def main():
     aprg.add_argument("--threshold", type=float, default=0.5, help="Occupancy threshold for wall classification (default: 0.5)")
     aprg.add_argument("--wall-thickness", type=int, default=2, help="Wall band thickness in cells (default: 2)")
     aprg.add_argument("--flip-period", type=int, default=2, help="Phase period k for flip-rate calculations (default: 2)")
+    aprg.add_argument("--mask-config", default="", help="Optional mask config JSON for additional overlays")
     aprg.set_defaults(func=cmd_regionize)
 
     # animate

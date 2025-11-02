@@ -148,8 +148,8 @@ def _write_region_labels(masks: Dict[str, np.ndarray], out_path: Path, allow_ove
     print(f"[masks] wrote {out_path}")
 
 
-def generate_masks(config_path: Path, outdir: Path, run: str | None = None, window: str = "",
-                   allow_overlap: bool | None = None) -> Dict[str, np.ndarray]:
+def _build_region_masks(config_path: Path, run: str | None = None, window: str = "",
+                        allow_overlap: bool | None = None) -> tuple[GridSpec, Dict[str, np.ndarray], bool, Dict[str, Any]]:
     config = _load_config(config_path)
     grid = _infer_grid(config, run_path=run, window=window)
     H, W = grid.height, grid.width
@@ -190,6 +190,22 @@ def generate_masks(config_path: Path, outdir: Path, run: str | None = None, wind
         if not mask.any():
             print(f"[masks][warn] Region '{name}' selects zero cells.")
         region_masks[name] = mask
+
+    return grid, region_masks, allow_overlap, config
+
+
+def load_masks_from_config(config_path: Path, run: str | None = None, window: str = "",
+                           allow_overlap: bool | None = None) -> tuple[GridSpec, Dict[str, np.ndarray], bool]:
+    grid, region_masks, allow_overlap, _ = _build_region_masks(config_path, run=run, window=window,
+                                                               allow_overlap=allow_overlap)
+    return grid, region_masks, allow_overlap
+
+
+def generate_masks(config_path: Path, outdir: Path, run: str | None = None, window: str = "",
+                   allow_overlap: bool | None = None) -> Dict[str, np.ndarray]:
+    grid, region_masks, allow_overlap, config = _build_region_masks(config_path, run=run, window=window,
+                                                                    allow_overlap=allow_overlap)
+    H, W = grid.height, grid.width
 
     outdir = Path(outdir)
     outdir.mkdir(parents=True, exist_ok=True)

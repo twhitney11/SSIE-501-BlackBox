@@ -5,12 +5,14 @@ import json
 from collections import Counter, deque
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, Tuple
+from typing import Dict, Tuple, Iterable, List
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.colors import ListedColormap
+from matplotlib.lines import Line2D
+from itertools import cycle
 
 from scipy.ndimage import (
     binary_opening,
@@ -29,6 +31,7 @@ from .gridmaps import (
     per_cell_conditional_entropy,
     per_cell_phase_flip_rate,
 )
+from .maskgen import load_masks_from_config
 try:
     from .utils import parse_window
 except ImportError:  # pragma: no cover
@@ -47,6 +50,14 @@ class RegionizeConfig:
     threshold: float
     wall_thickness: int
     flip_period: int
+    mask_config: Path | None = None
+
+
+@dataclass
+class OverlaySpec:
+    mask: np.ndarray
+    color: str
+    label: str | None = None
 
 
 def dilate(mask: np.ndarray, iterations: int = 1, structure=CROSS4) -> np.ndarray:
@@ -347,14 +358,24 @@ def write_mask_csv(path: Path, name: str, mask: np.ndarray) -> None:
     print(f"[regionize] saved {path}")
 
 
-def save_occupancy_plot(occ: np.ndarray, wall_mask: np.ndarray, cfg: RegionizeConfig, run_name: str) -> None:
+def save_occupancy_plot(occ: np.ndarray, cfg: RegionizeConfig, run_name: str,
+                        overlays: Iterable[OverlaySpec] | None = None, suffix: str = "") -> None:
     plt.figure(figsize=(6, 6))
     im = plt.imshow(occ, cmap="inferno", interpolation="nearest", vmin=0.0, vmax=1.0)
     plt.colorbar(im, fraction=0.046, pad=0.04, label=f"{cfg.label} occupancy")
-    plt.contour(wall_mask, levels=[0.5], colors="cyan", linewidths=1.2)
     plt.title(f"{run_name}: {cfg.label} occupancy\nwindow={cfg.window or 'full'} threshold={cfg.threshold}")
     plt.axis("off")
-    out_path = cfg.outdir / f"{run_name}_occupancy_{cfg.label}.png"
+    legend_handles: List[Line2D] = []
+    for spec in overlays or []:
+        mask = spec.mask.astype(bool)
+        if mask.size == 0 or not mask.any():
+            continue
+        plt.contour(mask, levels=[0.5], colors=spec.color, linewidths=1.2)
+        if spec.label:
+            legend_handles.append(Line2D([0], [0], color=spec.color, linewidth=1.2, label=spec.label))
+    if legend_handles:
+        plt.legend(handles=legend_handles, loc="lower right", fontsize=8, frameon=True)
+    out_path = cfg.outdir / f"{run_name}_occupancy_{cfg.label}{suffix}.png"
     plt.savefig(out_path, dpi=150, bbox_inches="tight")
     plt.close()
     print(f"[regionize] saved {out_path}")
@@ -585,7 +606,22 @@ def run_regionize(cfg: RegionizeConfig) -> Dict[str, Dict[str, float]]:
     pd.DataFrame(region_rows).to_csv(cfg.outdir / f"{run_name}_region_labels.csv", index=False)
     print(f"[regionize] saved {cfg.outdir / f'{run_name}_region_labels.csv'}")
 
-    save_occupancy_plot(occ, wall0, cfg, run_name)
+    overlays = [OverlaySpec(mask=wall0, color="cyan", label="wall")]
+    save_occupancy_plot(occ, cfg, run_name, overlays=overlays, suffix="")
+    save_occupancy_plot(occ, cfg, run_name, overlays=[], suffix="_plain")
+    if cfg.mask_config:
+        _, config_masks, _ = load_masks_from_config(cfg.mask_config, run=str(cfg.run_dir), window=cfg.window or "")
+        colors = cycle(["#1f77b4", "#ff7f0e", "#2ca02c", "#d62728",
+                         "#9467bd", "#8c564b", "#e377c2", "#7f7f7f",
+                         "#bcbd22", "#17becf"])
+        config_overlays = [
+            OverlaySpec(mask=mask.astype(bool), color=next(colors), label=name)
+            for name, mask in config_masks.items()
+            if mask.any()
+        ]
+        if config_overlays:
+            save_occupancy_plot(occ, cfg, run_name, overlays=config_overlays, suffix="_config")
+
     save_region_overlay(wall0, bulk_inside, bulk_outside, near_inside, near_outside, cfg, run_name)
     full_mask = np.ones_like(entropy, dtype=bool)
     save_metric_heatmap(entropy, full_mask, f"{run_name}: entropy", cfg.outdir / f"{run_name}_entropy_heatmap.png", vmin=0.0)
