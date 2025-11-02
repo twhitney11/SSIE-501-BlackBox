@@ -71,7 +71,7 @@ This can generate:
 * **Shape diagnostics** — optional flags such as `--do-ring`, `--do-cycle`, `--do-torus`, `--autocorr`, and `--near-cycle` add ring-radius tracking, cycle detection, torus experiments, and correlation scans. Tune near-cycle behaviour with `--near-cycle-maxlag` and `--near-cycle-eps`.
 * **Perturb & simulate** — `--perturb ...` and `--simulate ...` pair with `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, etc. to stress the inferred classifier and export rollout JSON/PNGs.
 * **Rulebooks** — `--build-rulebook` (with `--rb-k`, `--rb-split`, `--rb-name`) exports exact phase rulebooks; `--simulate-rulebook ... --rb-steps` replays them with optional PNG snapshots via `--rb-png`, `--rb-save-every`, `--rb-colors`, and fallback control through `--rb-fallback`.
-* **Scoped analysis** — limit calculations to a mask with `--scope-mask path:is_region` (CSV of 0/1) or a region-label file via `--scope-region path:region`. Add `--scope-invert` to flip the mask. This pairs well with `bbx regionize` or manual masks (see below).
+* **Scoped analysis** — limit calculations to a mask with `--scope-mask path:is_region` (CSV of 0/1) or a region-label file via `--scope-region path:region`. Add `--scope-invert` to flip the mask. When a scope is active the analyzer also saves `label_histogram_<mask>.png` for that region. This pairs well with `bbx regionize` or manual masks (see below).
 
 All artifacts are saved to `reports/` (JSON, CSV, PNGs).
 
@@ -207,7 +207,7 @@ Below is a quick reference of the available subcommands and their key flags.
 |---------|-------------|-------------|
 | `collect` | Capture one or many runs from the PHP interface. | `--base-url`, `--steps`, `--runs`, `--out`, `--run-prefix`, `--seed`, `--sleep-ms`, `--no-reset` |
 | `process` | Print coverage/conflict summaries. | `--runs`, `--radius`, `--window` |
-| `analyze` | Core analysis suite (rule learning, diagnostics, simulation). | `--runs`, `--radius`, `--window`, `--tests`, `--period-scan`, `--train-clf`, `--do-*`, `--near-cycle`, `--near-cycle-maxlag`, `--near-cycle-eps`, `--perturb`, `--simulate`, `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, `--build-rulebook`, `--rb-k`, `--rb-split`, `--rb-name`, `--rb-fallback`, `--rb-steps`, `--rb-png`, `--rb-save-every`, `--rb-colors`, `--scope-mask`, `--scope-region`, `--scope-invert` |
+| `analyze` | Core analysis suite (rule learning, diagnostics, simulation). | `--runs`, `--radius`, `--window`, `--tests`, `--period-scan`, `--train-clf`, `--do-*`, `--near-cycle`, `--near-cycle-maxlag`, `--near-cycle-eps`, `--perturb`, `--simulate`, `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, `--build-rulebook`, `--rb-k`, `--rb-split`, `--rb-name`, `--rb-fallback`, `--rb-steps`, `--rb-png`, `--rb-save-every`, `--rb-colors`, `--scope-mask(path[:column])`, `--scope-region(path:region)`, `--scope-invert` |
 | `fractions` | Fractions, regional breakdowns, change curves. | `--runs`, `--out`, `--colors`, `--smooth`, `--region-labels`, `--window` |
 | `gof` | Goodness-of-fit / locality testing. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode {local,center,global}`, `--model {logistic,rule,markov,knn}`, `--knn-k`, `--max-samples`, `--permutations`, `--seed`, `--out` |
 | `rbxplore` | Rulebook symmetry/MI/tree exploration. | `--rb`, `--do`, `--tree-phase`, `--tree-region`, `--tree-depth`, `--out` |

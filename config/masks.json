@@ -1,0 +1,42 @@
+  {
+    "grid": { "height": 20, "width": 20 },
+
+    "regions": [
+      {
+        "name": "outer_band",
+        "include": [
+          { "type": "rect", "top": 0, "left": 0, "height": 20, "width": 20 }
+        ],
+        "exclude": [
+          { "type": "rect", "top": 2, "left": 1, "height": 16, "width": 18 }
+        ]
+      },
+
+      {
+        "name": "wall_ring",
+        "include": [
+          { "type": "rect", "top": 2, "left": 1, "height": 16, "width": 18 }
+        ],
+        "exclude": [
+          { "type": "rect", "top": 4, "left": 3, "height": 12, "width": 14 }
+        ]
+      },
+
+      {
+        "name": "white_interior",
+        "include": [
+          { "type": "rect", "top": 4, "left": 3, "height": 12, "width": 14 }
+        ],
+        "exclude": [
+          { "type": "rect", "top": 7, "left": 7, "height": 6, "width": 6 }
+        ]
+      },
+
+      {
+        "name": "core",
+        "include": [
+          { "type": "rect", "top": 7, "left": 7, "height": 6, "width": 6 }
+        ]
+      }
+    ]
+  }

@@ -3,6 +3,7 @@
 import argparse
 import json
 import random
+import re
 from pathlib import Path
 from collections import Counter, defaultdict
 
@@ -417,13 +418,26 @@ def plot_mismatch_curve(states, r=1, outdir: Path = None, prefix="", scope_mask:
         print(f"[saved] {p}")
     plt.close()
 
-def plot_label_histogram(states, labels, colors, outdir: Path = None, prefix=""):
+def plot_label_histogram(states, labels, colors, outdir: Path = None, prefix="",
+                         scope_mask: np.ndarray | None = None, filename_suffix: str = ""):
     title="Label histogram"
     import matplotlib.pyplot as plt
     import numpy as np
 
-    init_counts = np.bincount(states[0].ravel(), minlength=len(labels))
-    final_counts = np.bincount(states[-1].ravel(), minlength=len(labels))
+    S0 = states[0]
+    S1 = states[-1]
+    if scope_mask is not None:
+        if scope_mask.shape != S0.shape:
+            raise ValueError("Scope mask shape mismatch for label histogram")
+        mask = scope_mask.astype(bool)
+        if mask.sum() == 0:
+            print("[warn] scope mask for histogram selects zero cells; skipping plot")
+            return
+        init_counts = np.bincount(S0[mask].ravel(), minlength=len(labels))
+        final_counts = np.bincount(S1[mask].ravel(), minlength=len(labels))
+    else:
+        init_counts = np.bincount(S0.ravel(), minlength=len(labels))
+        final_counts = np.bincount(S1.ravel(), minlength=len(labels))
 
     # Sort labels by final counts
     order = np.argsort(-final_counts)  # descending
@@ -454,7 +468,8 @@ def plot_label_histogram(states, labels, colors, outdir: Path = None, prefix="")
 
     fig.tight_layout()
     if outdir:
-        outpath = Path(outdir) / f"{prefix}label_histogram.png"
+        suffix = filename_suffix or ""
+        outpath = Path(outdir) / f"{prefix}label_histogram{suffix}.png"
         fig.savefig(outpath, dpi=150, facecolor="#f0f0f0")
         print(f"[saved] {outpath}")
     else:
@@ -906,6 +921,12 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
         colors = load_label_colors("label_colors.json")
         plot_mismatch_curve(per_run[0], r=radius, outdir=outdir, prefix="", scope_mask=scope_mask)
         plot_label_histogram(per_run[0], labels, colors, outdir=outdir, prefix="")
+        if scope_mask is not None:
+            slug = re.sub(r"[^A-Za-z0-9]+", "_", scope_desc or "scoped").strip("_") or "scoped"
+            plot_label_histogram(
+                per_run[0], labels, colors, outdir=outdir, prefix="",
+                scope_mask=scope_mask, filename_suffix=f"_{slug}"
+            )
 
     # Consistency across runs
     try:
