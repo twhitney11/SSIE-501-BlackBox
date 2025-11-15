@@ -207,7 +207,7 @@ Below is a quick reference of the available subcommands and their key flags.
 |---------|-------------|-------------|
 | `collect` | Capture one or many runs from the PHP interface. | `--base-url`, `--steps`, `--runs`, `--out`, `--run-prefix`, `--seed`, `--sleep-ms`, `--no-reset` |
 | `process` | Print coverage/conflict summaries. | `--runs`, `--radius`, `--window` |
-| `analyze` | Core analysis suite (rule learning, diagnostics, simulation). | `--runs`, `--radius`, `--window`, `--tests`, `--period-scan`, `--train-clf`, `--do-*`, `--near-cycle`, `--near-cycle-maxlag`, `--near-cycle-eps`, `--perturb`, `--simulate`, `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, `--build-rulebook`, `--rb-k`, `--rb-split`, `--rb-name`, `--rb-fallback`, `--rb-steps`, `--rb-png`, `--rb-save-every`, `--rb-colors`, `--scope-mask(path[:column])`, `--scope-region(path:region)`, `--scope-invert` |
+| `analyze` | Core analysis suite (rule learning, diagnostics, simulation). | `--runs`, `--radius`, `--window`, `--tests`, `--period-scan`, `--train-clf`, `--do-*`, `--near-cycle`, `--near-cycle-maxlag`, `--near-cycle-eps`, `--perturb`, `--simulate`, `--sim-steps`, `--sim-save-every`, `--sim-png`, `--sim-colors`, `--build-rulebook`, `--rb-k`, `--rb-split`, `--rb-name`, `--rb-fallback`, `--rb-steps`, `--rb-png`, `--rb-save-every`, `--rb-colors`, `--scope-mask(path[:column])`, `--scope-region(path:region)`, `--scope-invert`, `--region-models` |
 | `fractions` | Fractions, regional breakdowns, change curves. | `--runs`, `--out`, `--colors`, `--smooth`, `--region-labels`, `--window` |
 | `gof` | Goodness-of-fit / locality testing. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode {local,center,global}`, `--model {logistic,rule,markov,knn}`, `--knn-k`, `--max-samples`, `--permutations`, `--seed`, `--out` |
 | `rbxplore` | Rulebook symmetry/MI/tree exploration. | `--rb`, `--do`, `--tree-phase`, `--tree-region`, `--tree-depth`, `--out` |
@@ -220,7 +220,8 @@ Below is a quick reference of the available subcommands and their key flags.
 | `stationarity` | Stationarity / cross-run generalization. | `--train-run`, `--train-window`, `--test-runs`, `--test-window`, `--radius`, `--feature-mode`, `--model`, `--segments`, `--max-samples`, `--seed`, `--out` |
 | `colors` | Print label→color mapping. | `--colors` |
 | `masks` | Build manual region masks from a JSON config. | `--config`, `--out`, `--run`, `--window`, `--allow-overlap` |
-| `metrics` | Conditional entropy & mutual information per region. | `--runs`, `--config`, `--window`, `--top-mi`, `--mi-lag`, `--out` |
+| `metrics` | Conditional entropy & mutual information per region. | `--runs`, `--config`, `--window`, `--top-mi`, `--mi-lag`, `--fit-labels`, `--fit-models`, `--out` |
+| `exportcsv` | Flatten runs into a single CSV file. | `--runs`, `--run-dir`, `--run-glob`, `--out`, `--window`, `--include-encoded` |
 
 ## Why these analyses?
 
@@ -304,7 +305,8 @@ Notes:
 - Omit `grid` if you prefer to infer the shape from a run: `bbx masks --config manual_regions.json --run data/run_000 --window last:2000` will read the lattice size from the specified run/window.
 - Supported shapes include `rect` (`top`, `left`, `height`, `width`), `disk`/`circle` (`center_i`, `center_j`, `radius`), and explicit `points` (`[[i, j], ...]`). Combine multiple shapes in `include`, remove areas with `exclude`, or reuse previously declared regions with `inherit`, `include_regions`, and `exclude_regions`.
 - Region overlaps are rejected unless you opt-in. Set `"allow_overlap": true` in the config or pass `--allow-overlap` when running `bbx masks`.
-- Quantify dynamics inside each mask with `bbx metrics --runs data/run_000 data/run_001 --config config/masks.json --window last:2000 --out reports/metrics`. The command saves `region_metrics_summary.csv`, per-region `*_top_mi_pairs.csv`, and companion plots (`stable_cells.png`, `stable_cells_regions.png`, `self_transition_fraction.png`, `cond_entropy*.png`, `transitions_vs_changes.png`, `<region>_top_mi_pairs.png`, `region_mi_heatmap.png`, `<region>_transition_heatmap.png`) so you can inspect stability, inter-region coupling, and label transitions at a glance.
+- Use the same mask config to train region-specific simulators: `bbx analyze --runs data/run_000 --train-clf --region-models config/masks.json --out reports/an_region`. Each region gets its own classifier and mask, and simulation automatically applies the right model per cell.
+- Quantify dynamics inside each mask with `bbx metrics --runs data/run_000 data/run_001 --config config/masks.json --window last:2000 --out reports/metrics`. The command saves `region_metrics_summary.csv`, per-region `*_top_mi_pairs.csv`, and companion plots (`stable_cells.png`, `stable_cells_regions.png`, `self_transition_fraction.png`, `cond_entropy*.png`, `transitions_vs_changes.png`, `<region>_top_mi_pairs.png`, `region_mi_heatmap.png`, `<region>_transition_heatmap.png`). Add `--fit-labels gru,mex --fit-models linear,exponential,power` to fit label-fraction series and produce `label_fraction_fits.csv` plus `label_fit_<label>.png` overlays. Include `--combos pair` to generate adjacency snapshots (`<region>_pairwise_counts.csv`, `<region>_pairwise_heatmap.png`) with chi-square scores against independent baselines.
 
 ## Example: Full cycle
 

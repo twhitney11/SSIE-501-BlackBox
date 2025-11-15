@@ -21,6 +21,7 @@ Subcommands:
 
 import argparse
 from pathlib import Path
+from typing import List, Sequence
 
 import numpy as np
 
@@ -30,6 +31,7 @@ from . import fractions as fr
 from .viz import load_label_colors
 from .maskgen import generate_masks
 from .metrics import compute_region_metrics
+from .export import export_runs_to_csv
 # ---------- helpers ----------
 def _p(p): return Path(p)
 def _add_out(ap): ap.add_argument("--out", default="reports", help="Output folder (default: reports)")
@@ -96,6 +98,8 @@ def cmd_analyze(args):
         scope_mask = np.logical_not(scope_mask)
         scope_desc = (scope_desc or "mask") + " (inverted)"
 
+    region_model_config = _p(args.region_models) if getattr(args, "region_models", "") else None
+
     an.run_analysis(
         run_dirs=args.runs,
         outdir=outdir,
@@ -136,6 +140,7 @@ def cmd_analyze(args):
         window=args.window,
         scope_mask=scope_mask,
         scope_desc=scope_desc,
+        region_model_config=region_model_config,
     )
 
 
@@ -148,6 +153,9 @@ def cmd_masks(args):
 
 def cmd_metrics(args):
     outdir = _p(args.out)
+    fit_labels = [lab.strip() for lab in args.fit_labels.split(",") if lab.strip()]
+    fit_models = [m.strip() for m in args.fit_models.split(",") if m.strip()]
+    combos = [c.strip() for c in args.combos.split(",") if c.strip()]
     compute_region_metrics(
         run_dirs=args.runs,
         config_path=_p(args.config),
@@ -155,6 +163,33 @@ def cmd_metrics(args):
         window=args.window,
         top_mi_pairs=args.top_mi,
         mi_lag=args.mi_lag,
+        fit_labels=fit_labels,
+        fit_models=fit_models,
+        combos=combos,
+    )
+
+
+def _resolve_runs(run_list: Sequence[str], run_glob: str, run_dir: str) -> List[str]:
+    resolved: List[str] = []
+    if run_list:
+        resolved.extend(run_list)
+    base_dir = Path(run_dir) if run_dir else Path(".")
+    if run_glob:
+        resolved.extend(sorted(str(p) for p in base_dir.glob(run_glob) if p.is_dir()))
+    elif not run_list:
+        resolved.extend(sorted(str(p) for p in base_dir.iterdir() if p.is_dir()))
+    if not resolved:
+        raise ValueError("No runs found; provide --runs, --run-glob, or ensure run_dir contains run folders.")
+    return resolved
+
+
+def cmd_exportcsv(args):
+    run_paths = _resolve_runs(args.runs, args.run_glob, args.run_dir)
+    export_runs_to_csv(
+        run_dirs=run_paths,
+        out_path=_p(args.out),
+        window=args.window,
+        include_encoded=args.include_encoded,
     )
 
 
@@ -355,6 +390,7 @@ def main():
     apa.add_argument("--scope-mask", default="", help="Mask CSV to restrict analysis cells (path[:column])")
     apa.add_argument("--scope-region", default="", help="Region labels CSV and name (path:region_name)")
     apa.add_argument("--scope-invert", action="store_true", help="Invert the loaded scope mask")
+    apa.add_argument("--region-models", default="", help="Mask config for region-specific classifiers/rulebooks")
 
     _add_out(apa)
     apa.set_defaults(func=cmd_analyze)
@@ -377,7 +413,20 @@ def main():
     apmet.add_argument("--top-mi", type=int, default=20, help="Number of top MI cell pairs to record per region")
     apmet.add_argument("--mi-lag", type=int, default=0, help="Lag (in steps) for MI; 0 = synchronous")
     apmet.add_argument("--out", default="reports/metrics", help="Output directory (default: reports/metrics)")
+    apmet.add_argument("--fit-labels", default="", help="Comma list of labels to fit global fractions (default: none)")
+    apmet.add_argument("--fit-models", default="linear,exponential,power", help="Models to try: linear, exponential, power (comma separated)")
+    apmet.add_argument("--combos", default="", help="Comma list of combinatorial snapshots (e.g. 'pair')")
     apmet.set_defaults(func=cmd_metrics)
+
+    # exportcsv
+    apex = sub.add_parser("exportcsv", help="Flatten runs into a single CSV for analysis")
+    apex.add_argument("--runs", nargs="*", default=[])
+    apex.add_argument("--run-dir", default="", help="Base directory containing run_* folders (default: cwd)")
+    apex.add_argument("--run-glob", default="", help="Optional glob (e.g. 'run_*') to select runs under --run-dir; empty means every subdirectory")
+    apex.add_argument("--out", required=True, help="Output CSV path")
+    apex.add_argument("--window", default="", help="Time window 'start:end' or 'last:N'")
+    apex.add_argument("--include-encoded", action="store_true", help="Include numeric label indices")
+    apex.set_defaults(func=cmd_exportcsv)
 
     # fractions
     apf = sub.add_parser("fractions", help="Fractions + region + diff/front plots")

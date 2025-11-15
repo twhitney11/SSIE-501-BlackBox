@@ -16,7 +16,10 @@ from .maskgen import load_masks_from_config
 
 
 def compute_region_metrics(run_dirs: Sequence[str], config_path: Path, outdir: Path,
-                           window: str = "", top_mi_pairs: int = 20, mi_lag: int = 0) -> None:
+                           window: str = "", top_mi_pairs: int = 20, mi_lag: int = 0,
+                           fit_labels: Sequence[str] | None = None,
+                           fit_models: Sequence[str] | None = None,
+                           combos: Sequence[str] | None = None) -> None:
     if not run_dirs:
         raise ValueError("At least one run directory must be provided.")
 
@@ -86,6 +89,10 @@ def compute_region_metrics(run_dirs: Sequence[str], config_path: Path, outdir: P
     _plot_top_mi_pair_networks(summary_dicts, (H, W), outdir)
     _plot_region_mi_heatmap(summary_dicts, seq_cache, log2, mi_lag, outdir)
     _plot_region_transition_heatmaps(summary_dicts, labels, outdir)
+    if combos and "pair" in combos:
+        _compute_pairwise_combos(run_arrays, labels, summary_dicts, region_masks, outdir)
+    if fit_labels:
+        _fit_label_fractions(run_arrays, labels, fit_labels, fit_models, outdir, region_masks)
 
 
 def _compute_metrics_for_region(region_name: str, mask: np.ndarray, run_arrays: List[np.ndarray],
@@ -378,6 +385,135 @@ def _plot_top_mi_pair_networks(summary_dicts: Sequence[Dict[str, float]], shape:
         print(f"[metrics] wrote {out_path}")
 
 
+def _fit_label_fractions(run_arrays: Sequence[np.ndarray], labels: Sequence[str],
+                         selected_labels: Sequence[str], model_names: Sequence[str] | None,
+                         outdir: Path,
+                         region_masks: Dict[str, np.ndarray]) -> None:
+    label_to_idx = {lab: idx for idx, lab in enumerate(labels)}
+    chosen = [lab for lab in selected_labels if lab in label_to_idx]
+    if not chosen:
+        print("[metrics] fit labels not found; skipping label fits")
+        return
+    models = model_names or ["linear", "exponential", "power"]
+    rows = [["region", "label", "model", "param_a", "param_b", "r2"]]
+    for region_name, region_mask in region_masks.items():
+        mask = region_mask.astype(bool)
+        for label in chosen:
+            idx = label_to_idx[label]
+            times, values = _gather_fraction_samples(run_arrays, idx, mask)
+            if times.size < 2:
+                continue
+            fit_results = _run_model_fits(times, values, models)
+            if not fit_results:
+                continue
+            for res in fit_results:
+                rows.append([region_name, label, res["name"],
+                             f"{res.get('a', float('nan')):.6f}",
+                             f"{res.get('b', float('nan')):.6f}",
+                             f"{res['r2']:.6f}"])
+            best = max(fit_results, key=lambda r: r["r2"])
+            _plot_label_fit(times, values, best, f"{label} ({region_name})", outdir, region_name, label)
+    if len(rows) > 1:
+        path = outdir / "label_fraction_fits.csv"
+        _write_csv(path, rows[0], rows[1:])
+        print(f"[metrics] wrote {path}")
+
+
+def _gather_fraction_samples(run_arrays: Sequence[np.ndarray], label_idx: int, mask: np.ndarray | None = None) -> Tuple[np.ndarray, np.ndarray]:
+    times, values = [], []
+    for arr in run_arrays:
+        if mask is None:
+            fractions = (arr == label_idx).mean(axis=(1, 2))
+        else:
+            masked = (arr == label_idx)[:, mask]
+            fractions = masked.mean(axis=1)
+        times.append(np.arange(len(fractions)))
+        values.append(fractions)
+    if not times:
+        return np.array([]), np.array([])
+    return np.concatenate(times), np.concatenate(values)
+
+
+def _run_model_fits(times: np.ndarray, values: np.ndarray, model_names: Sequence[str]) -> List[Dict[str, float]]:
+    results: List[Dict[str, float]] = []
+    for name in model_names:
+        if name == "linear":
+            res = _fit_linear(times, values)
+        elif name == "exponential":
+            res = _fit_exponential(times, values)
+        elif name == "power":
+            res = _fit_power(times, values)
+        else:
+            continue
+        if res:
+            results.append(res)
+    return results
+
+
+def _fit_linear(t: np.ndarray, y: np.ndarray) -> Dict[str, float] | None:
+    if t.size < 2:
+        return None
+    coeffs = np.polyfit(t, y, 1)
+    pred = coeffs[0] * t + coeffs[1]
+    r2 = _r2_score(y, pred)
+    return {"name": "linear", "a": coeffs[1], "b": coeffs[0], "pred": pred, "r2": r2}
+
+
+def _fit_exponential(t: np.ndarray, y: np.ndarray) -> Dict[str, float] | None:
+    mask = y > 0
+    if np.count_nonzero(mask) < 2:
+        return None
+    coeffs = np.polyfit(t[mask], np.log(y[mask]), 1)
+    pred = np.exp(coeffs[0] * t + coeffs[1])
+    r2 = _r2_score(y, pred)
+    return {"name": "exponential", "a": np.exp(coeffs[1]), "b": coeffs[0], "pred": pred, "r2": r2}
+
+
+def _fit_power(t: np.ndarray, y: np.ndarray) -> Dict[str, float] | None:
+    mask = (t > 0) & (y > 0)
+    if np.count_nonzero(mask) < 2:
+        return None
+    coeffs = np.polyfit(np.log(t[mask]), np.log(y[mask]), 1)
+    pred = np.exp(coeffs[1]) * np.power(np.maximum(t, 1e-9), coeffs[0])
+    r2 = _r2_score(y, pred)
+    return {"name": "power", "a": np.exp(coeffs[1]), "b": coeffs[0], "pred": pred, "r2": r2}
+
+
+def _r2_score(y_true: np.ndarray, y_pred: np.ndarray) -> float:
+    mask = np.isfinite(y_pred)
+    if not np.any(mask):
+        return float("nan")
+    y_true = y_true[mask]
+    y_pred = y_pred[mask]
+    ss_res = np.sum((y_true - y_pred) ** 2)
+    ss_tot = np.sum((y_true - np.mean(y_true)) ** 2)
+    if ss_tot == 0:
+        return 0.0
+    return 1.0 - ss_res / ss_tot
+
+
+def _plot_label_fit(times: np.ndarray, values: np.ndarray, best_fit: Dict[str, float],
+                    label: str, outdir: Path, region: str, raw_label: str) -> None:
+    order = np.argsort(times)
+    t_sorted = times[order]
+    y_sorted = values[order]
+    pred_sorted = best_fit["pred"][order]
+    plt.figure(figsize=(6, 4))
+    plt.scatter(t_sorted, y_sorted, s=10, label="data", color="#1f77b4", alpha=0.6)
+    plt.plot(t_sorted, pred_sorted, color="#d62728", linewidth=2,
+             label=f"{best_fit['name']} fit (R²={best_fit['r2']:.3f})")
+    plt.xlabel("Step")
+    plt.ylabel("Fraction of grid")
+    plt.title(f"Label fraction fit — {label}")
+    plt.legend()
+    plt.grid(alpha=0.3, linestyle="--")
+    plt.tight_layout()
+    slug = f"label_fit_{raw_label}_{region.replace(' ', '_')}"
+    out_path = outdir / f"{slug}.png"
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"[metrics] wrote {out_path}")
+
 def _plot_region_mi_heatmap(summary_dicts: Sequence[Dict[str, float]], seq_cache: Dict[Tuple[int, int], np.ndarray],
                             log2: float, mi_lag: int, outdir: Path) -> None:
     if not summary_dicts:
@@ -519,6 +655,122 @@ def _plot_region_transition_heatmaps(summary_dicts: Sequence[Dict[str, float]], 
         fig.savefig(out_path, dpi=150)
         plt.close(fig)
         print(f"[metrics] wrote {out_path}")
+
+
+def _compute_pairwise_combos(run_arrays: Sequence[np.ndarray], labels: Sequence[str],
+                             summary_dicts: Sequence[Dict[str, float]],
+                             region_masks: Dict[str, np.ndarray], outdir: Path) -> None:
+    label_count = len(labels)
+    for info in summary_dicts:
+        region = info["region"]
+        mask = region_masks.get(region)
+        if mask is None:
+            continue
+        mask_bool = mask.astype(bool)
+        counts = np.zeros((label_count, label_count), dtype=np.int64)
+        horiz_idx = np.argwhere(mask_bool[:, :-1] & mask_bool[:, 1:])
+        vert_idx = np.argwhere(mask_bool[:-1, :] & mask_bool[1:, :])
+        for arr in run_arrays:
+            if horiz_idx.size:
+                left = arr[:, horiz_idx[:, 0], horiz_idx[:, 1]]
+                right = arr[:, horiz_idx[:, 0], horiz_idx[:, 1] + 1]
+                np.add.at(counts, (left.ravel(), right.ravel()), 1)
+            if vert_idx.size:
+                top = arr[:, vert_idx[:, 0], vert_idx[:, 1]]
+                bottom = arr[:, vert_idx[:, 0] + 1, vert_idx[:, 1]]
+                np.add.at(counts, (top.ravel(), bottom.ravel()), 1)
+        total_pairs = counts.sum()
+        if total_pairs == 0:
+            continue
+        freq = _region_label_frequency(run_arrays, mask_bool, label_count)
+        expected = np.outer(freq, freq) * total_pairs
+        chi = np.zeros_like(expected, dtype=float)
+        valid = expected > 0
+        chi[valid] = (counts[valid] - expected[valid]) ** 2 / expected[valid]
+        chi_stat = float(np.nansum(chi))
+        _write_pairwise_csv(region, labels, counts, expected, chi, outdir)
+        _plot_pairwise_heatmap(region, labels, counts, chi_stat, outdir)
+
+
+def _region_label_frequency(run_arrays: Sequence[np.ndarray], mask: np.ndarray, label_count: int) -> np.ndarray:
+    counts = np.zeros(label_count, dtype=np.int64)
+    for arr in run_arrays:
+        vals = arr[:, mask]
+        unique, cnt = np.unique(vals, return_counts=True)
+        counts[unique] += cnt
+    total = counts.sum()
+    if total == 0:
+        return np.zeros(label_count, dtype=float)
+    return counts / total
+
+
+def _write_pairwise_csv(region: str, labels: Sequence[str], counts: np.ndarray,
+                        expected: np.ndarray, chi: np.ndarray, outdir: Path) -> None:
+    slug = region.replace(" ", "_")
+    header = ["label_a", "label_b", "observed", "expected", "chi_contrib"]
+    rows = []
+    L = len(labels)
+    for i in range(L):
+        for j in range(L):
+            rows.append([labels[i], labels[j], str(int(counts[i, j])),
+                         f"{expected[i, j]:.4f}", f"{chi[i, j]:.4f}"])
+    path = outdir / f"{slug}_pairwise_counts.csv"
+    _write_csv(path, header, rows)
+    print(f"[metrics] wrote {path}")
+
+
+def _plot_pairwise_heatmap(region: str, labels: Sequence[str], counts: np.ndarray,
+                           chi_stat: float, outdir: Path) -> None:
+    slug = region.replace(" ", "_")
+    fig, ax = plt.subplots(figsize=(6, 5))
+    im = ax.imshow(counts, cmap="plasma")
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label("Adjacency count")
+    ax.set_xticks(range(len(labels)))
+    ax.set_xticklabels(labels, rotation=45, ha="right")
+    ax.set_yticks(range(len(labels)))
+    ax.set_yticklabels(labels)
+    ax.set_title(f"Adjacency counts – {region}\nChi-square={chi_stat:.2f}")
+    fig.tight_layout()
+    out_path = outdir / f"{slug}_pairwise_heatmap.png"
+    fig.savefig(out_path, dpi=150)
+    plt.close(fig)
+    print(f"[metrics] wrote {out_path}")
+
+
+def _compute_pairwise_combos(run_arrays: Sequence[np.ndarray], labels: Sequence[str],
+                             summary_dicts: Sequence[Dict[str, float]],
+                             region_masks: Dict[str, np.ndarray], outdir: Path) -> None:
+    label_count = len(labels)
+    for info in summary_dicts:
+        region = info["region"]
+        mask = region_masks.get(region)
+        if mask is None:
+            continue
+        mask_bool = mask.astype(bool)
+        counts = np.zeros((label_count, label_count), dtype=np.int64)
+        horiz_idx = np.argwhere(mask_bool[:, :-1] & mask_bool[:, 1:])
+        vert_idx = np.argwhere(mask_bool[:-1, :] & mask_bool[1:, :])
+        for arr in run_arrays:
+            if horiz_idx.size:
+                left = arr[:, horiz_idx[:, 0], horiz_idx[:, 1]]
+                right = arr[:, horiz_idx[:, 0], horiz_idx[:, 1] + 1]
+                np.add.at(counts, (left.ravel(), right.ravel()), 1)
+            if vert_idx.size:
+                top = arr[:, vert_idx[:, 0], vert_idx[:, 1]]
+                bottom = arr[:, vert_idx[:, 0] + 1, vert_idx[:, 1]]
+                np.add.at(counts, (top.ravel(), bottom.ravel()), 1)
+        total_pairs = counts.sum()
+        if total_pairs == 0:
+            continue
+        freq = _region_label_frequency(run_arrays, mask_bool, label_count)
+        expected = np.outer(freq, freq) * total_pairs
+        chi = np.zeros_like(expected, dtype=float)
+        valid = expected > 0
+        chi[valid] = (counts[valid] - expected[valid]) ** 2 / expected[valid]
+        chi_stat = float(np.nansum(chi))
+        _write_pairwise_csv(region, labels, counts, expected, chi, outdir)
+        _plot_pairwise_heatmap(region, labels, counts, chi_stat, outdir)
 
 
 def _plot_region_mi_heatmap(summary_dicts: Sequence[Dict[str, float]], seq_cache: Dict[Tuple[int, int], np.ndarray],

@@ -17,6 +17,7 @@ import hashlib
 from .process import neigh_key_wrap, apply_rule_wrap
 from .utils import parse_window
 from .best_k import summarise_period_scan
+from .maskgen import load_masks_from_config
 
 # Set bg color to gray because "mex" is white and invisible.
 plt.rcParams['axes.facecolor']   = '#cccccc' 
@@ -40,6 +41,19 @@ def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
     return p
 
+def _validate_region_masks(region_masks, shape):
+    if not region_masks:
+        return
+    H, W = shape
+    coverage = np.zeros((H, W), dtype=np.int32)
+    for name, mask in region_masks.items():
+        if mask.shape != (H, W):
+            raise ValueError(f"Region mask '{name}' shape {mask.shape} does not match grid {shape}")
+        coverage += mask.astype(np.int32)
+    if np.any(coverage == 0):
+        raise ValueError("Region masks must cover the full grid (found uncovered cells).")
+    if np.any(coverage > 1):
+        raise ValueError("Region masks must be disjoint (a cell belongs to multiple regions).")
 def save_json(obj, path: Path):
     path.write_text(json.dumps(obj, indent=2))
 
@@ -867,7 +881,8 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
                  perturb_spec="", simulate_spec="", sim_steps=0, sim_save_every=0, sim_png=False, sim_seed_colors="label_colors.json",
                  build_rulebook=False, rb_k=None, rb_split="none", rb_name="rulebooks",
                  simulate_rulebook_from="", rb_steps=0, rb_fallback="copy", rb_png=False, rb_save_every=0, rb_colors="label_colors.json",
-                 window: str | None = None, scope_mask: np.ndarray | None = None, scope_desc: str | None = None):
+                 window: str | None = None, scope_mask: np.ndarray | None = None, scope_desc: str | None = None,
+                 region_model_config: Path | None = None):
 
     tests = set((tests or "").split(",")) if tests else set()
     all_states, labels, label_to_idx, per_run = load_runs_encoded(run_dirs, window=window)
@@ -891,6 +906,12 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
         pct = (active / total) * 100.0
         desc = scope_desc or "custom mask"
         print(f"[scope] applying mask '{desc}' -> {active}/{total} cells ({pct:.2f}%)")
+
+    region_masks = None
+    if region_model_config:
+        _, masks_dict, _ = load_masks_from_config(region_model_config, run=run_dirs[0], window=window or "")
+        region_masks = {name: mask.astype(bool) for name, mask in masks_dict.items()}
+        _validate_region_masks(region_masks, per_run[0][0].shape)
 
     # Coverage (aggregate)
     seen = neighborhood_counts(all_states, r=radius, scope_mask=scope_mask)
@@ -992,15 +1013,18 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
             print(f"[warn] period scan summary failed: {e}")
 
     if train_clf:
-        # pick a k: use provided clf_period, or guess small (e.g. 2 or from your period_scan)
         k = int(clf_period) if clf_period else 2
         print(f"[clf] training logistic regression with k={k}, r={radius}")
-        clf, meta = train_classifier(all_states, labels, r=radius, k=k, max_steps=200, C=1.0)
-        export_classifier(clf, meta, outdir)
-
-        # quick smoke test: simulate 30 steps from the first state of run_0 and save PNGs
-        init = per_run[0][0]  # first frame of first run
-        sim_states = simulate_with_classifier(init, clf, meta, steps=30)
+        if region_masks:
+            clf_models, meta = train_classifier_region_models(all_states, labels, region_masks, r=radius, k=k, max_steps=200, C=1.0)
+            export_classifier_regions(clf_models, meta, region_masks, outdir)
+            init = per_run[0][0]
+            sim_states = simulate_with_classifier_regions(init, clf_models, meta, steps=30, region_masks=region_masks)
+        else:
+            clf, meta = train_classifier(all_states, labels, r=radius, k=k, max_steps=200, C=1.0)
+            export_classifier(clf, meta, outdir)
+            init = per_run[0][0]
+            sim_states = simulate_with_classifier(init, clf, meta, steps=30)
         try:
             from .viz import load_label_colors, plot_sequence
             colors = load_label_colors("label_colors.json")
@@ -1012,12 +1036,20 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
     if simulate_spec:
         # load classifier + meta
         try:
-            import joblib
-            clf = joblib.load(outdir / "classifier.joblib")
             meta = json.loads((outdir / "classifier_meta.json").read_text())
         except Exception as e:
-            print("[error] simulate requires classifier.joblib + classifier_meta.json in reports/:", e)
+            print("[error] missing classifier_meta.json in reports/:", e)
             return
+        mode = meta.get("mode", "global")
+        if mode == "region":
+            clfs = load_region_classifier_models(meta, outdir)
+        else:
+            try:
+                import joblib
+                clf = joblib.load(outdir / "classifier.joblib")
+            except Exception as e:
+                print("[error] simulate requires classifier.joblib + classifier_meta.json in reports/:", e)
+                return
 
         # decide initial
         init = choose_initial_state(simulate_spec, per_run, labels, label_to_idx)
@@ -1026,7 +1058,12 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
             print("[warn] --simulate provided but --sim-steps not set (>0). Nothing to do.")
             return
 
-        sim_states = simulate_with_classifier(init, clf, meta, steps=steps)
+        if mode == "region":
+            region_masks_cache = _load_region_masks_from_meta(meta, outdir)
+            sim_states = simulate_with_classifier_regions(init, clfs, meta, steps=steps,
+                                                          region_masks=region_masks_cache)
+        else:
+            sim_states = simulate_with_classifier(init, clf, meta, steps=steps)
 
         # save JSONs
         save_sequence_json(sim_states, labels, outdir, prefix="simulate_", save_every=int(sim_save_every))
@@ -1497,6 +1534,27 @@ def build_dataset(states, r=1, k=None, L=None, use_parity=True, use_region=True,
                 y.append(int(T[i, j]))
     return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
 
+def build_dataset_masked(states, mask, r=1, k=None, L=None, use_parity=True, use_phase=True, max_steps=200):
+    mask = mask.astype(bool)
+    coords = np.argwhere(mask)
+    if coords.size == 0:
+        return np.empty((0, 0), dtype=np.float32), np.empty((0,), dtype=np.int64)
+    X, y = [], []
+    L = int(L)
+    TMAX = min(max_steps, len(states)-1)
+    H, W = states[0].shape
+    for t in range(TMAX):
+        S, T = states[t], states[t+1]
+        phase = (t % k) if (use_phase and k) else None
+        for i, j in coords:
+            x = features_for_cell(S, int(i), int(j), r, H, W, L,
+                                  k_phase=phase if use_phase else None,
+                                  parity=((int(i)+int(j))&1) if use_parity else None,
+                                  region=None)
+            X.append(x)
+            y.append(int(T[int(i), int(j)]))
+    return np.array(X, dtype=np.float32), np.array(y, dtype=np.int64)
+
 def train_classifier(all_states, labels, r=1, k=2, max_steps=200, C=1.0):
     """
     Train multinomial logistic regression on positional features + center label + phase + parity + region.
@@ -1513,6 +1571,7 @@ def train_classifier(all_states, labels, r=1, k=2, max_steps=200, C=1.0):
         "radius": r,
         "period_k": k,
         "L": L,
+        "mode": "global",
         "feature_schema": {
             "pos_block": (2*r+1)**2 * (L+1),
             "center_block": L,
@@ -1523,11 +1582,91 @@ def train_classifier(all_states, labels, r=1, k=2, max_steps=200, C=1.0):
     }
     return clf, meta
 
+def _slugify(name: str) -> str:
+    slug = "".join(ch.lower() if ch.isalnum() else "_" for ch in name)
+    slug = slug.strip("_")
+    return slug or "region"
+
+def train_classifier_region_models(all_states, labels, region_masks, r=1, k=2, max_steps=200, C=1.0):
+    L = len(labels)
+    models = {}
+    regions_meta = []
+    for name, mask in region_masks.items():
+        X, y = build_dataset_masked(all_states, mask, r=r, k=k, L=L,
+                                    use_parity=True, use_phase=True, max_steps=max_steps)
+        if y.size == 0:
+            print(f"[warn] region '{name}' has no training samples; skipping")
+            continue
+        if np.unique(y).size < 2:
+            print(f"[warn] region '{name}' has only one label in training data; skipping")
+            continue
+        clf = LogisticRegression(
+            penalty="l2", C=C, solver="lbfgs", multi_class="multinomial", max_iter=200
+        )
+        clf.fit(X, y)
+        slug = _slugify(name)
+        models[name] = clf
+        regions_meta.append({"name": name, "slug": slug, "samples": int(y.size), "cells": int(mask.sum())})
+    if not models:
+        raise ValueError("Region classifier training produced no models.")
+    meta = {
+        "labels": labels,
+        "radius": r,
+        "period_k": k,
+        "L": L,
+        "mode": "region",
+        "feature_schema": {
+            "pos_block": (2*r+1)**2 * (L+1),
+            "center_block": L,
+            "phase_block": 16,
+            "parity_block": 1,
+            "region_block": 3
+        },
+        "regions": regions_meta,
+    }
+    return models, meta
+
+def export_classifier_regions(models: Dict[str, LogisticRegression], meta, region_masks, outdir: Path):
+    outdir.mkdir(parents=True, exist_ok=True)
+    mask_dir = outdir / "region_masks"
+    mask_dir.mkdir(parents=True, exist_ok=True)
+    for region_info in meta.get("regions", []):
+        name = region_info["name"]; slug = region_info["slug"]
+        clf = models.get(name)
+        if clf is None:
+            continue
+        clf_path = outdir / f"classifier_{slug}.joblib"
+        joblib.dump(clf, clf_path)
+        mask_path = mask_dir / f"{slug}.npy"
+        np.save(mask_path, region_masks[name].astype(np.uint8))
+        region_info["classifier"] = clf_path.name
+        region_info["mask"] = str(mask_path.relative_to(outdir))
+    save_json(meta, outdir / "classifier_meta.json")
+    print(f"[saved] region classifier ensemble → {len(models)} models")
+
 def export_classifier(clf, meta, outdir: Path):
     outdir.mkdir(parents=True, exist_ok=True)
     joblib.dump(clf, outdir / "classifier.joblib")
     save_json(meta, outdir / "classifier_meta.json")
     print(f"[saved] {outdir/'classifier.joblib'}, {outdir/'classifier_meta.json'}")
+
+def load_region_classifier_models(meta, outdir: Path):
+    models = {}
+    for region in meta.get("regions", []):
+        clf_path = outdir / region.get("classifier", "")
+        if not clf_path.exists():
+            raise FileNotFoundError(f"Missing classifier file for region {region['name']}: {clf_path}")
+        models[region["name"]] = joblib.load(clf_path)
+    return models
+
+def _load_region_masks_from_meta(meta, outdir: Path):
+    masks = {}
+    for region in meta.get("regions", []):
+        mask_path = outdir / region.get("mask", "")
+        if not mask_path.exists():
+            raise FileNotFoundError(f"Missing mask file for region {region['name']}: {mask_path}")
+        masks[region["name"]] = np.load(mask_path).astype(bool)
+    return masks
 
 def simulate_with_classifier(initial, clf, meta, steps=50):
     """Run the learned classifier forward for N steps. Returns list of states (including initial)."""
@@ -1544,6 +1683,41 @@ def simulate_with_classifier(initial, clf, meta, steps=50):
                 x = np.array([features_for_cell(S, i, j, r, H, W, L,
                                                 k_phase=phase, parity=((i+j)&1),
                                                 region=reg)], dtype=np.float32)
+                pred = clf.predict(x)[0]
+                Tnext[i, j] = pred
+        states.append(Tnext)
+    return states
+
+def simulate_with_classifier_regions(initial, models, meta, steps=50,
+                                     region_masks=None, base_dir: Path | None = None):
+    states = [initial.copy()]
+    r = meta["radius"]; L = meta["L"]; k = meta["period_k"]
+    H, W = initial.shape
+    if region_masks is None:
+        region_masks = _load_region_masks_from_meta(meta, base_dir or Path("."))
+    assign = np.full((H, W), -1, dtype=np.int32)
+    regions = meta.get("regions", [])
+    for idx, region in enumerate(regions):
+        mask = region_masks.get(region["name"])
+        if mask is None:
+            raise ValueError(f"Missing mask for region {region['name']}")
+        assign[mask.astype(bool)] = idx
+    if np.any(assign < 0):
+        raise ValueError("Region masks do not cover the full grid.")
+
+    for t in range(steps):
+        S = states[-1]
+        phase = t % k
+        Tnext = np.empty_like(S)
+        for i in range(H):
+            for j in range(W):
+                reg_idx = assign[i, j]
+                region_info = regions[reg_idx]
+                clf = models[region_info["name"]]
+                x = np.array([features_for_cell(S, i, j, r, H, W, L,
+                                                k_phase=phase,
+                                                parity=((i+j)&1),
+                                                region=None)], dtype=np.float32)
                 pred = clf.predict(x)[0]
                 Tnext[i, j] = pred
         states.append(Tnext)
