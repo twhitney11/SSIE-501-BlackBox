@@ -74,6 +74,7 @@ def cmd_process(args):
 
 
 def cmd_analyze(args):
+    run_dirs = _resolve_runs(args.runs, args.run_glob, args.run_dir)
     outdir = _p(args.out)
     scope_mask = None
     scope_desc = None
@@ -101,7 +102,7 @@ def cmd_analyze(args):
     region_model_config = _p(args.region_models) if getattr(args, "region_models", "") else None
 
     an.run_analysis(
-        run_dirs=args.runs,
+        run_dirs=run_dirs,
         outdir=outdir,
         radius=args.radius,
         tests=args.tests,
@@ -351,7 +352,9 @@ def main():
 
     # analyze
     apa = sub.add_parser("analyze", help="Period scan, classifier, simulate, rulebooks")
-    apa.add_argument("--runs", nargs="+", required=True)
+    apa.add_argument("--runs", nargs="+", default=[])
+    apa.add_argument("--run-dir", default="", help="Base directory for runs when using --run-glob")
+    apa.add_argument("--run-glob", default="", help="Glob under run-dir to select runs (e.g. 'run_00[0-9]')")
     apa.add_argument("--radius", type=int, default=1)
     apa.add_argument("--tests", default="", help="Comma-set: shape,conflicts,permutation,totalistic (empty=all)")
     apa.add_argument("--period-scan", default="", help="Comma-set of: none,edge,corner_edge (empty=skip)")

@@ -6,6 +6,7 @@ import random
 import re
 from pathlib import Path
 from collections import Counter, defaultdict
+from typing import Dict
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -1052,25 +1053,50 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
                 return
 
         # decide initial
-        init = choose_initial_state(simulate_spec, per_run, labels, label_to_idx)
+        init, seed_meta = choose_initial_state(simulate_spec, per_run, labels, label_to_idx)
         steps = int(sim_steps) if sim_steps else 0
         if steps <= 0:
             print("[warn] --simulate provided but --sim-steps not set (>0). Nothing to do.")
             return
 
+        comparison_masks = None
         if mode == "region":
             region_masks_cache = _load_region_masks_from_meta(meta, outdir)
             sim_states = simulate_with_classifier_regions(init, clfs, meta, steps=steps,
                                                           region_masks=region_masks_cache)
+            comparison_masks = region_masks_cache
         else:
             sim_states = simulate_with_classifier(init, clf, meta, steps=steps)
+
+        accuracy = None
+        if seed_meta.get("source") == "run":
+            run_idx = seed_meta.get("run_index", 0) or 0
+            step_idx = seed_meta.get("step_index", 0) or 0
+            if 0 <= run_idx < len(per_run):
+                accuracy = evaluate_simulation_against_run(sim_states, per_run[run_idx], start_idx=step_idx,
+                                                           region_masks=comparison_masks)
+                if accuracy is None:
+                    print("[warn] simulate accuracy skipped: insufficient overlapping ground-truth steps.")
+                elif accuracy.get("truncated"):
+                    print("[warn] simulate accuracy truncated: simulation extends beyond observed run.")
+            else:
+                print(f"[warn] simulate accuracy skipped: run index {run_idx} not available.")
+        elif seed_meta.get("source") == "file":
+            print("[info] simulate accuracy comparison requires run-based seed; skipping for file seed.")
 
         # save JSONs
         save_sequence_json(sim_states, labels, outdir, prefix="simulate_", save_every=int(sim_save_every))
 
         # optional PNG panel
         if sim_png:
-            save_sequence_png(sim_states, labels, outdir, prefix="simulate_", colors_path=sim_seed_colors)
+            steps_to_plot = None
+            if sim_save_every and int(sim_save_every) > 0:
+                step = int(sim_save_every)
+                steps_to_plot = list(range(0, len(sim_states), step))
+                if (len(sim_states) - 1) not in steps_to_plot:
+                    steps_to_plot.append(len(sim_states) - 1)
+            save_sequence_png(sim_states, labels, outdir, prefix="simulate_", steps_to_plot=steps_to_plot,
+                              colors_path=sim_seed_colors)
 
         # also dump a fractions CSV for the rollout
         try:
@@ -1089,6 +1115,36 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
             print(f"[saved] {outdir/'simulate_fractions.csv'}")
         except Exception as e:
             print("[warn] could not write simulate_fractions.csv:", e)
+        if accuracy:
+            save_csv(accuracy["state_rows"], outdir / "simulate_state_accuracy.csv")
+            if len(accuracy["transition_rows"]) > 1:
+                save_csv(accuracy["transition_rows"], outdir / "simulate_transition_accuracy.csv")
+            plot_simulation_accuracy_curve(accuracy["state_rows"], outdir, prefix="simulate_",
+                                           title="Simulation vs run (global mismatch)")
+            extra = {
+                "seed": seed_meta,
+                "state_summary": accuracy["state_summary"],
+                "transition_summary": accuracy["transition_summary"],
+                "states_compared": accuracy["states_compared"],
+                "transitions_compared": accuracy["transitions_compared"],
+            }
+            region_rows = accuracy.get("region_rows") or {}
+            region_summary = accuracy.get("region_summary") or {}
+            if region_rows:
+                for name, rows in region_rows.items():
+                    slug = re.sub(r"[^a-z0-9]+", "_", name.lower()).strip("_") or "region"
+                    path = outdir / f"simulate_state_accuracy_{slug}.csv"
+                    save_csv(rows, path)
+                    plot_simulation_accuracy_curve(rows, outdir, prefix=f"simulate_{slug}_",
+                                                   title=f"{name} mismatch")
+                extra["region_summary"] = region_summary
+            save_json(extra, outdir / "simulate_accuracy_summary.json")
+            mean_h = accuracy["state_summary"].get("mean_hamming")
+            tran_acc = accuracy["transition_summary"].get("mean_transition_accuracy")
+            if mean_h is not None:
+                print(f"[sim-accuracy] mean normalized Hamming={mean_h:.4f}")
+            if tran_acc is not None:
+                print(f"[sim-accuracy] mean transition accuracy={tran_acc:.4f}")
 
     # -------- Build and export rulebooks (exact) --------
     if build_rulebook:
@@ -1110,7 +1166,7 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
         rb = load_rulebooks(rb_path)
 
         # pick initial
-        init = choose_initial_state(simulate_rulebook_from, per_run, labels, label_to_idx)
+        init, _ = choose_initial_state(simulate_rulebook_from, per_run, labels, label_to_idx)
         steps = int(rb_steps) if rb_steps else 0
         if steps <= 0:
             print("[warn] --simulate-rulebook provided but --rb-steps not set (>0). Nothing to do.")
@@ -1168,28 +1224,47 @@ def load_seed_from_file(path, labels, label_to_idx):
 
 def choose_initial_state(sim_spec, per_run_states, labels, label_to_idx):
     """
+    Resolve simulation seed and return (state, metadata).
+
     sim_spec formats:
       - 'run:idx=<k>'      → use per_run_states[0][k]
       - 'run:last'         → last state from run_0
       - 'file:<path.json>' → load a seed JSON and encode
+      - '' (empty / None)  → default to per_run_states[0][0]
     """
+    meta = {
+        "source": "run",
+        "run_index": 0,
+        "step_index": 0,
+        "description": "run0:idx=0",
+    }
     if not sim_spec:
-        # default: first frame of first run
-        return per_run_states[0][0]
+        return per_run_states[0][0], meta
 
     if sim_spec.startswith("run:"):
         arg = sim_spec[4:]
         if arg == "last":
-            return per_run_states[0][-1]
+            meta["step_index"] = len(per_run_states[0]) - 1
+            meta["description"] = "run0:last"
+            return per_run_states[0][-1], meta
         if arg.startswith("idx="):
             k = int(arg.split("=", 1)[1])
             k = max(0, min(k, len(per_run_states[0]) - 1))
-            return per_run_states[0][k]
+            meta["step_index"] = k
+            meta["description"] = f"run0:idx={k}"
+            return per_run_states[0][k], meta
         raise ValueError(f"Bad run spec: {sim_spec}")
 
     if sim_spec.startswith("file:"):
         path = sim_spec[5:]
-        return load_seed_from_file(path, labels, label_to_idx)
+        meta.update({
+            "source": "file",
+            "run_index": None,
+            "step_index": None,
+            "path": path,
+            "description": f"file:{path}",
+        })
+        return load_seed_from_file(path, labels, label_to_idx), meta
 
     raise ValueError(f"Unrecognized simulate spec: {sim_spec}")
 
@@ -1221,7 +1296,10 @@ def save_sequence_png(states, labels, outdir: Path, prefix="sim_", steps_to_plot
     If steps_to_plot is None, picks ~15 evenly spaced snapshots including 0 and final.
     """
     try:
-        from viz import load_label_colors, plot_sequence
+        try:
+            from .viz import load_label_colors, plot_sequence
+        except ImportError:
+            from viz import load_label_colors, plot_sequence
         import numpy as np
         colors = load_label_colors(colors_path)
         if steps_to_plot is None:
@@ -1247,6 +1325,143 @@ def save_sequence_png(states, labels, outdir: Path, prefix="sim_", steps_to_plot
         print(f"[saved] {p}")
     except Exception as e:
         print("[warn] PNG sequence save skipped (viz.py/colors missing):", e)
+
+
+def plot_simulation_accuracy_curve(state_rows, outdir: Path, prefix="simulate_", title="Simulation vs run (global mismatch)"):
+    """Plot normalized Hamming vs run_step from the accuracy table."""
+    if len(state_rows) <= 1:
+        return
+    import numpy as np
+    header = state_rows[0]
+    try:
+        step_idx = header.index("run_step")
+        h_idx = header.index("normalized_hamming")
+    except ValueError:
+        return
+    data = np.array([[row[step_idx], row[h_idx]] for row in state_rows[1:]], dtype=float)
+    run_steps = data[:, 0]
+    hammings = data[:, 1]
+    plt.figure(figsize=(8, 4))
+    plt.plot(run_steps, hammings, linewidth=1.5)
+    plt.xlabel("run step")
+    plt.ylabel("normalized Hamming")
+    plt.title(title)
+    plt.grid(True, alpha=0.3)
+    outdir.mkdir(parents=True, exist_ok=True)
+    path = outdir / f"{prefix}accuracy_curve.png"
+    plt.savefig(path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {path}")
+
+
+def evaluate_simulation_against_run(sim_states, actual_states, start_idx=0, region_masks: dict[str, np.ndarray] | None = None):
+    """
+    Compare simulated rollout to a ground-truth run starting at start_idx.
+    Returns dict with per-step rows and summary stats or None if there is no overlap.
+    """
+    import numpy as np
+    available = len(actual_states) - start_idx
+    if available <= 0:
+        return None
+    overlap = min(len(sim_states), available)
+    actual_slice = actual_states[start_idx:start_idx + overlap]
+    if overlap == 0:
+        return None
+
+    state_rows = [["offset", "run_step", "normalized_hamming", "match_fraction", "mismatches", "total_cells"]]
+    hammings = []
+    region_data = {}
+    region_masks_bool = {}
+    if region_masks:
+        for name, mask in region_masks.items():
+            mask_bool = mask.astype(bool)
+            total = int(mask_bool.sum())
+            if total == 0:
+                continue
+            region_masks_bool[name] = mask_bool
+            region_data[name] = {
+                "rows": [["region", "offset", "run_step", "normalized_hamming", "match_fraction", "mismatches", "total_cells"]],
+                "hammings": [],
+                "total": total,
+            }
+
+    for offset, (sim_state, actual_state) in enumerate(zip(sim_states, actual_slice)):
+        total = sim_state.size
+        mismatches = diff_count(sim_state, actual_state)
+        norm = mismatches / total if total else float("nan")
+        match_frac = 1.0 - norm if np.isfinite(norm) else float("nan")
+        state_rows.append([offset, start_idx + offset, norm, match_frac, mismatches, total])
+        if np.isfinite(norm):
+            hammings.append(norm)
+        for name, info in region_data.items():
+            mask = region_masks_bool[name]
+            total_reg = info["total"]
+            mism_reg = int((sim_state != actual_state)[mask].sum())
+            norm_reg = mism_reg / total_reg if total_reg else float("nan")
+            match_reg = 1.0 - norm_reg if np.isfinite(norm_reg) else float("nan")
+            info["rows"].append([name, offset, start_idx + offset, norm_reg, match_reg, mism_reg, total_reg])
+            if np.isfinite(norm_reg):
+                info["hammings"].append(norm_reg)
+
+    transition_rows = [["offset", "run_step", "transition_accuracy", "change_accuracy", "matching_transitions", "total_cells"]]
+    transition_accs = []
+    change_accs = []
+    if overlap >= 2:
+        for offset in range(overlap - 1):
+            actual_prev = actual_slice[offset]
+            actual_next = actual_slice[offset + 1]
+            sim_prev = sim_states[offset]
+            sim_next = sim_states[offset + 1]
+            matches = int(np.logical_and(actual_prev == sim_prev, actual_next == sim_next).sum())
+            total = actual_prev.size
+            acc = matches / total if total else float("nan")
+            change_actual = (actual_next != actual_prev)
+            change_sim = (sim_next != sim_prev)
+            change_match = int((change_actual == change_sim).sum())
+            change_acc = change_match / total if total else float("nan")
+            transition_rows.append([offset, start_idx + offset, acc, change_acc, matches, total])
+            if np.isfinite(acc):
+                transition_accs.append(acc)
+            if np.isfinite(change_acc):
+                change_accs.append(change_acc)
+
+    state_summary = {
+        "steps_compared": overlap,
+        "mean_hamming": float(np.mean(hammings)) if hammings else None,
+        "mean_match_fraction": float(np.mean([1.0 - h for h in hammings])) if hammings else None,
+        "final_hamming": float(hammings[-1]) if hammings else None,
+        "final_match_fraction": float(1.0 - hammings[-1]) if hammings else None,
+    }
+    transition_summary = {
+        "transitions_compared": max(0, overlap - 1),
+        "mean_transition_accuracy": float(np.mean(transition_accs)) if transition_accs else None,
+        "mean_change_accuracy": float(np.mean(change_accs)) if change_accs else None,
+        "final_transition_accuracy": float(transition_accs[-1]) if transition_accs else None,
+        "final_change_accuracy": float(change_accs[-1]) if change_accs else None,
+    }
+    region_summary = {}
+    for name, info in region_data.items():
+        hvals = info["hammings"]
+        region_summary[name] = {
+            "mean_hamming": float(np.mean(hvals)) if hvals else None,
+            "mean_match_fraction": float(np.mean([1.0 - h for h in hvals])) if hvals else None,
+            "final_hamming": float(hvals[-1]) if hvals else None,
+            "final_match_fraction": float(1.0 - hvals[-1]) if hvals else None,
+            "cells": info["total"],
+        }
+
+    return {
+        "state_rows": state_rows,
+        "transition_rows": transition_rows,
+        "state_summary": state_summary,
+        "transition_summary": transition_summary,
+        "states_compared": overlap,
+        "transitions_compared": max(0, overlap - 1),
+        "truncated": overlap < len(sim_states),
+        "start_index": start_idx,
+        "region_rows": {name: info["rows"] for name, info in region_data.items()},
+        "region_summary": region_summary,
+    }
 
 
     # --- Shape diagnostics (ring/border evidence) ---
