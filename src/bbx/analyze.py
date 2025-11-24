@@ -949,6 +949,13 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
                 per_run[0], labels, colors, outdir=outdir, prefix="",
                 scope_mask=scope_mask, filename_suffix=f"_{slug}"
             )
+        try:
+            plot_label_fraction_evolution(
+                per_run, labels, colors, outdir=outdir,
+                steps_to_show=(0, 500, 5000), scope_mask=scope_mask
+            )
+        except Exception as e:
+            print("[warn] label fraction evolution plot skipped:", e)
 
     # Consistency across runs
     try:
@@ -1182,6 +1189,7 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
 
         # fractions CSV for the rollout
         try:
+            import numpy as np
             H, W = sim_states[0].shape
             total = H*W
             rows = []
@@ -1325,6 +1333,96 @@ def save_sequence_png(states, labels, outdir: Path, prefix="sim_", steps_to_plot
         print(f"[saved] {p}")
     except Exception as e:
         print("[warn] PNG sequence save skipped (viz.py/colors missing):", e)
+
+
+def _compute_label_fractions(S: np.ndarray, label_count: int, scope_mask: np.ndarray | None = None) -> np.ndarray:
+    import numpy as np
+    if scope_mask is not None:
+        if scope_mask.shape != S.shape:
+            raise ValueError("Scope mask shape mismatch for label histogram")
+        mask = scope_mask.astype(bool)
+        if mask.sum() == 0:
+            raise ValueError("Scope mask selects zero cells.")
+        counts = np.bincount(S[mask].ravel(), minlength=label_count)
+        total = mask.sum()
+    else:
+        counts = np.bincount(S.ravel(), minlength=label_count)
+        total = S.size
+    return counts / total if total else np.zeros(label_count, dtype=float)
+
+
+def plot_label_fraction_evolution(per_run_states, labels, colors, outdir: Path,
+                                  steps_to_show=(0, 500, 1500), scope_mask: np.ndarray | None = None,
+                                  filename="label_fraction_mean_std.png"):
+    """Plot mean±std label fractions across runs at selected steps."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+
+    if not per_run_states:
+        return
+
+    max_required = max(steps_to_show)
+    fractions_per_step: dict[int, list[np.ndarray]] = {step: [] for step in steps_to_show}
+    available_steps = set()
+
+    for run in per_run_states:
+        if len(run) - 1 < min(steps_to_show):
+            continue
+        for step in steps_to_show:
+            if step < len(run):
+                try:
+                    frac = _compute_label_fractions(run[step], len(labels), scope_mask=scope_mask)
+                except ValueError:
+                    continue
+                fractions_per_step[step].append(frac)
+                available_steps.add(step)
+
+    steps_present = [step for step in steps_to_show if fractions_per_step.get(step)]
+    if not steps_present:
+        print("[warn] label fraction evolution plot skipped (steps missing across runs).")
+        return
+
+    mean_matrix = []
+    std_matrix = []
+    for step in steps_present:
+        arr = np.stack(fractions_per_step[step], axis=0)
+        mean_matrix.append(np.mean(arr, axis=0))
+        std_matrix.append(np.std(arr, axis=0))
+    mean_matrix = np.array(mean_matrix)
+    std_matrix = np.array(std_matrix)
+
+    # keep label order consistent using last step's ranking if available
+    sort_base = mean_matrix[-1]
+    order = np.argsort(-sort_base)
+    label_order = [labels[i] for i in order]
+    colors_order = [colors.get(lab, "#808080") for lab in label_order]
+
+    fig, axes = plt.subplots(len(steps_present), 1, figsize=(10, 4 * len(steps_present)), sharex=True)
+    if len(steps_present) == 1:
+        axes = [axes]
+    x = np.arange(len(labels))
+
+    for ax, idx, step in zip(axes, range(len(steps_present)), steps_present):
+        means = mean_matrix[idx][order]
+        stds = std_matrix[idx][order]
+        err_style = dict(ecolor="#0d47a1", elinewidth=2.0, capsize=5, capthick=1.5)
+        ax.bar(x, means, yerr=stds, color=colors_order, alpha=0.9, error_kw=err_style)
+        ax.set_ylabel("Mean fraction")
+        ax.set_ylim(0, 1)
+        ax.set_title(f"Step {step} (n={len(fractions_per_step[step])})")
+        for xi, m, s in zip(x, means, stds):
+            y_text = min(0.98, m + s + 0.02)
+            ax.text(xi, y_text, f"{m:.2f}", ha="center", va="bottom", fontsize=8)
+            if s > 0:
+                ax.text(xi + 0.15, min(0.98, m + s + 0.04), f"±{s:.2f}", ha="left", va="bottom", fontsize=7, color="#0d47a1")
+
+    axes[-1].set_xticks(x)
+    axes[-1].set_xticklabels(label_order, rotation=45, ha="right")
+    fig.tight_layout()
+    out_path = Path(outdir) / filename
+    fig.savefig(out_path, dpi=150, facecolor="#f0f0f0")
+    plt.close(fig)
+    print(f"[saved] {out_path}")
 
 
 def plot_simulation_accuracy_curve(state_rows, outdir: Path, prefix="simulate_", title="Simulation vs run (global mismatch)"):
