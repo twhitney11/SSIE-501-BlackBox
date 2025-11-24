@@ -240,6 +240,52 @@ def confusion_matrix(y_true: np.ndarray, y_pred: np.ndarray, n_classes: int) -> 
     return conf
 
 
+# Abdullah Added on 11/23/25
+# Confusion Matrix Heatmap Plot
+# This function visualizes the confusion matrix as a color-coded heatmap showing the classification
+# performance of the model. The heatmap displays how many times each actual label (rows) was
+# predicted as each label (columns). Diagonal elements represent correct predictions, while
+# off-diagonal elements show misclassifications. The plot includes count annotations on each cell
+# and uses a blue color scale where darker colors indicate higher counts.
+def plot_confusion_matrix_heatmap(conf: np.ndarray, labels: Sequence[str], 
+                                   out_path: Path, title: str = "Confusion Matrix"):
+    """Plot confusion matrix as a heatmap."""
+    import matplotlib.pyplot as plt
+    import numpy as np
+    
+    fig, ax = plt.subplots(figsize=(8, 6))
+    im = ax.imshow(conf, cmap='Blues', interpolation='nearest')
+    
+    # Add colorbar
+    cbar = fig.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+    cbar.set_label('Count')
+    
+    # Set ticks and labels
+    n_classes = len(labels)
+    ax.set_xticks(range(n_classes))
+    ax.set_yticks(range(n_classes))
+    ax.set_xticklabels(labels, rotation=45, ha='right')
+    ax.set_yticklabels(labels)
+    
+    # Add text annotations
+    thresh = conf.max() / 2.0
+    for i in range(n_classes):
+        for j in range(n_classes):
+            text = ax.text(j, i, int(conf[i, j]),
+                         ha="center", va="center",
+                         color="white" if conf[i, j] > thresh else "black")
+    
+    ax.set_xlabel('Predicted')
+    ax.set_ylabel('Actual')
+    ax.set_title(title)
+    
+    fig.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    print(f"[saved] {out_path}")
+
+
 def log_loss(probs: np.ndarray, y_true: np.ndarray) -> float:
     eps = 1e-12
     idx = np.arange(len(y_true))
@@ -274,6 +320,43 @@ def calibration_curve(probs: np.ndarray, y_true: np.ndarray, n_bins: int = 10) -
             "obs_rate": float(correct[mask].mean()),
         })
     return pd.DataFrame(rows)
+
+
+# Abdullah Added on 11/23/25
+# Calibration Curve Plot
+# This function creates a calibration plot that assesses how well the model's predicted probabilities
+# match the observed frequencies. The plot shows the relationship between mean predicted probability
+# (x-axis) and observed rate (y-axis) across probability bins. A perfectly calibrated model would
+# follow the diagonal line (y=x), where predicted probabilities equal observed rates. Deviations
+# from this line indicate overconfidence (above diagonal) or underconfidence (below diagonal) in
+# the model's predictions. This is a key diagnostic for probabilistic classifiers.
+def plot_calibration_curve(calib_df: pd.DataFrame, out_path: Path, 
+                          title: str = "Calibration Curve"):
+    """Plot predicted vs observed probabilities."""
+    import matplotlib.pyplot as plt
+    
+    if calib_df.empty:
+        print(f"[warn] calibration data empty, skipping plot")
+        return
+    
+    plt.figure(figsize=(8, 6))
+    plt.plot(calib_df['pred_mean'], calib_df['obs_rate'], 'o-', 
+             linewidth=2, markersize=8, label='Model')
+    plt.plot([0, 1], [0, 1], 'k--', linewidth=1, label='Perfect calibration')
+    
+    plt.xlabel('Mean Predicted Probability')
+    plt.ylabel('Observed Rate')
+    plt.title(title)
+    plt.legend()
+    plt.grid(True, alpha=0.3)
+    plt.xlim(0, 1)
+    plt.ylim(0, 1)
+    
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {out_path}")
 
 
 def apply_permutation(X: np.ndarray, y: np.ndarray, kind: str, rng: np.random.Generator,
@@ -377,6 +460,10 @@ def run_gof(cfg: GOFConfig):
         suffix = window_tag(cfg.test_window)
         conf_path = cfg.outdir / f"confusion_{Path(run_path).name}_{suffix}.csv"
         pd.DataFrame(conf, index=labels, columns=labels).to_csv(conf_path)
+        # Plot confusion matrix as heatmap
+        plot_confusion_matrix_heatmap(conf, labels,
+            cfg.outdir / f"confusion_{Path(run_path).name}_{suffix}.png",
+            title=f"Confusion Matrix - {Path(run_path).name}")
 
         if probs is not None:
             ll = float(np.sum(np.log(np.clip(probs[np.arange(len(y_test)), y_test], 1e-12, 1.0))))
@@ -395,6 +482,10 @@ def run_gof(cfg: GOFConfig):
                 base_metrics["bic"] = None
             calib = calibration_curve(probs, y_test)
             calib.to_csv(cfg.outdir / f"calibration_{Path(run_path).name}_{suffix}.csv", index=False)
+            # Plot calibration curve
+            plot_calibration_curve(calib,
+                cfg.outdir / f"calibration_{Path(run_path).name}_{suffix}.png",
+                title=f"Calibration Curve - {Path(run_path).name}")
         else:
             base_metrics.update({"log_loss": None, "brier": None, "log_likelihood": None, "aic": None, "bic": None})
 

@@ -406,6 +406,112 @@ def compare_totalistic_vs_positional(states, r=1, scope_mask: np.ndarray | None 
 
 # --------------- plotting ---------------
 
+# Abdullah Added on 11/23/25
+# Period Scan Visualization Plot
+# This function visualizes the period scan results showing conflicts vs period k (time period).
+# The plot helps identify periodic behavior in the cellular automaton by showing which period
+# values (k) result in zero or minimal conflicts. When conflicts drop to zero at a specific k,
+# it indicates the system follows a k-step periodic rule. The plot can show multiple regions
+# (interior, edge, corner) or phases, making it easy to spot which periods exhibit consistent
+# deterministic behavior. Lower conflict values indicate more predictable, periodic dynamics.
+def plot_period_scan(rows, out_path: Path, title: str = "Period Scan - Conflicts vs k"):
+    """
+    Plot period scan results: conflicts vs period k.
+    rows: CSV-like rows with header ["k","split","phase","region","conflicts","rule_size"]
+    """
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    import numpy as np
+    
+    if len(rows) <= 1:
+        print(f"[warn] period scan data empty, skipping plot")
+        return
+    
+    # Convert to DataFrame
+    header = rows[0]
+    data = rows[1:]
+    df = pd.DataFrame(data, columns=header)
+    
+    # Convert numeric columns
+    df['k'] = pd.to_numeric(df['k'], errors='coerce')
+    df['conflicts'] = pd.to_numeric(df['conflicts'], errors='coerce')
+    df['phase'] = pd.to_numeric(df['phase'], errors='coerce')
+    
+    # Group by k and compute statistics
+    fig, axes = plt.subplots(1, 2, figsize=(14, 5))
+    
+    # Plot 1: Conflicts vs k (min conflicts per k)
+    ax1 = axes[0]
+    min_conflicts = df.groupby('k')['conflicts'].min().reset_index()
+    min_conflicts = min_conflicts.sort_values('k')
+    
+    ax1.plot(min_conflicts['k'], min_conflicts['conflicts'], 'o-', linewidth=2, markersize=6, label='Min conflicts')
+    ax1.axhline(y=0, color='g', linestyle='--', linewidth=1, alpha=0.7, label='Zero conflicts (periodic)')
+    ax1.set_xlabel('Period k')
+    ax1.set_ylabel('Conflicts')
+    ax1.set_title('Minimum Conflicts vs Period k')
+    ax1.grid(True, alpha=0.3)
+    ax1.legend()
+    
+    # Highlight zero-conflict periods
+    zero_k = min_conflicts[min_conflicts['conflicts'] == 0]['k'].values
+    if len(zero_k) > 0:
+        for k_val in zero_k:
+            ax1.axvline(x=k_val, color='green', linestyle=':', alpha=0.5, linewidth=1)
+        ax1.text(0.02, 0.98, f'Zero conflicts at k={", ".join(map(str, zero_k))}', 
+                transform=ax1.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.5))
+    
+    # Plot 2: Conflicts by region (if multiple regions)
+    ax2 = axes[1]
+    regions = df['region'].unique()
+    if len(regions) > 1:
+        for region in sorted(regions):
+            region_data = df[df['region'] == region].groupby('k')['conflicts'].min().reset_index()
+            region_data = region_data.sort_values('k')
+            ax2.plot(region_data['k'], region_data['conflicts'], 'o-', 
+                    linewidth=1.5, markersize=4, label=region, alpha=0.8)
+        ax2.axhline(y=0, color='g', linestyle='--', linewidth=1, alpha=0.7)
+        ax2.set_xlabel('Period k')
+        ax2.set_ylabel('Min Conflicts')
+        ax2.set_title('Conflicts vs k by Region')
+        ax2.legend()
+        ax2.grid(True, alpha=0.3)
+    else:
+        # If only one region, show conflicts by phase
+        phases = sorted(df['phase'].unique())
+        if len(phases) > 1 and len(phases) <= 10:  # Only if reasonable number of phases
+            for phase in phases:
+                phase_data = df[df['phase'] == phase].groupby('k')['conflicts'].min().reset_index()
+                phase_data = phase_data.sort_values('k')
+                ax2.plot(phase_data['k'], phase_data['conflicts'], 'o-', 
+                        linewidth=1, markersize=3, label=f'Phase {phase}', alpha=0.6)
+            ax2.axhline(y=0, color='g', linestyle='--', linewidth=1, alpha=0.7)
+            ax2.set_xlabel('Period k')
+            ax2.set_ylabel('Min Conflicts')
+            ax2.set_title('Conflicts vs k by Phase')
+            ax2.legend(fontsize=8)
+            ax2.grid(True, alpha=0.3)
+        else:
+            # Fallback: show rule size vs k
+            rule_sizes = df.groupby('k')['rule_size'].mean().reset_index()
+            rule_sizes = rule_sizes.sort_values('k')
+            ax2.plot(rule_sizes['k'], rule_sizes['rule_size'], 's-', 
+                    linewidth=2, markersize=5, color='orange', label='Avg rule size')
+            ax2.set_xlabel('Period k')
+            ax2.set_ylabel('Average Rule Size')
+            ax2.set_title('Rule Size vs Period k')
+            ax2.legend()
+            ax2.grid(True, alpha=0.3)
+    
+    plt.suptitle(title, fontsize=12, y=1.02)
+    plt.tight_layout()
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    plt.savefig(out_path, dpi=150, bbox_inches="tight")
+    plt.close()
+    print(f"[saved] {out_path}")
+
+
 def plot_mismatch_curve(states, r=1, outdir: Path = None, prefix="", scope_mask: np.ndarray | None = None):
     """Train on step t->t+1 and report exact replay mismatch for each of first K transitions."""
     K = min(100, len(states) - 1)
@@ -1008,6 +1114,10 @@ def run_analysis(run_dirs, outdir: Path, radius=1, tests=None, period_scan_mode=
             out_path = outdir / f"period_scan_{raw_mode}.csv"
             save_csv(rows, out_path)
             print(f"[saved] {out_path}")
+            # Plot period scan visualization
+            plot_period_scan(rows,
+                outdir / f"period_scan_{raw_mode}.png",
+                title=f"Period Scan - {raw_mode} (r={radius})")
         try:
             summarise_period_scan(outdir, [spec[0] for spec in scan_specs])
         except Exception as e:
